@@ -2303,6 +2303,8 @@ class ContDescrStateSpace(DescreteStateSpace):
             self.v_dQk = None
 
             self.square_root_computed = False
+            self.Q_inverse_computed = False
+            self.Q_svd_computed = False
             # !!!Print statistics! Which object is created
 
         def f_a(self, k,m,A):
@@ -2337,7 +2339,10 @@ class ContDescrStateSpace(DescreteStateSpace):
                 self.v_Qk = v_Qk
                 self.v_dAk = v_dAk
                 self.v_dQk = v_dQk
+                
                 self.Q_square_root_computed = False
+                self.Q_inverse_computed = False
+                self.Q_svd_computed = False
             else:
                 v_Ak = self.v_Ak
                 v_Qk = self.v_Qk
@@ -2359,8 +2364,10 @@ class ContDescrStateSpace(DescreteStateSpace):
             self.last_k = 0
             self.last_k_computed = False
             self.compute_derivatives = compute_derivatives
+            
             self.Q_square_root_computed = False
-
+            self.Q_inverse_computed = False
+            self.Q_svd_computed = False
             return self
 
         def Ak(self,k,m,P):
@@ -2386,7 +2393,13 @@ class ContDescrStateSpace(DescreteStateSpace):
 
             if ((self.last_k == k) and (self.last_k_computed == True)):
                 if not self.Q_square_root_computed:
-                    (U, S, Vh) = sp.linalg.svd( self.v_Qk, full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                    if not self.Q_svd_computed:
+                        (U, S, Vh) = sp.linalg.svd( self.v_Qk, full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                        self.Q_svd = (U, S, Vh)
+                        self.Q_svd_computed = True
+                    else:
+                        (U, S, Vh) = self.Q_svd
+                        
                     square_root = U * np.sqrt(S)
                     self.square_root_computed = True
                     self.Q_square_root = square_root
@@ -2396,7 +2409,33 @@ class ContDescrStateSpace(DescreteStateSpace):
                 raise ValueError("Square root of Q can not be computed")
 
             return square_root
+        
+        def Q_inverse(self, k, jitter=0.0):        
+            """
+            Inverse of the Q matrix.
+            Jitter is added to the diagonal of S if required.
+            """
+            
+            if ((self.last_k == k) and (self.last_k_computed == True)):
+                if not self.Q_inverse_computed:
+                    if not self.Q_svd_computed:
+                        (U, S, Vh) = sp.linalg.svd( self.v_Qk, full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                        self.Q_svd = (U, S, Vh)
+                        self.Q_svd_computed = True
+                    else:
+                        (U, S, Vh) = self.Q_svd
+                        
+                    Q_inverse = np.dot( Vh.T * ( 1.0/(S + jitter)) , U.T ) 
+                    self.Q_inverse_computed = True
+                    self.Q_inverse = Q_inverse
+                else:
+                    Q_inverse = self.Q_inverse
+            else:
+                raise ValueError("Inverse of Q can not be computed")
 
+            return Q_inverse
+        
+        
         def return_last(self):
             """
             Function returns last computed matrices.
@@ -2463,6 +2502,9 @@ class ContDescrStateSpace(DescreteStateSpace):
                             (self.reconstruct_indices.nbytes if (self.reconstruct_indices is not None) else 0)
 
             self.Q_svd_dict = {}
+            self.Q_square_root_dict = {}
+            self.Q_inverse_dict = {}
+            
             self.last_k = None
              # !!!Print statistics! Which object is created
             # !!!Print statistics! Print sizes of matrices
@@ -2503,17 +2545,49 @@ class ContDescrStateSpace(DescreteStateSpace):
             Square root of the noise matrix Q
             """
             matrix_index = self.reconstruct_indices[k]
-            if matrix_index in self.Q_svd_dict:
-                square_root = self.Q_svd_dict[matrix_index]
+            if matrix_index in self.Q_square_root_dict:
+                square_root = self.Q_square_root_dict[matrix_index]
             else:
-                (U, S, Vh) = sp.linalg.svd( self.Qs[:,:, matrix_index],
+                if matrix_index in self.Q_svd_dict:
+                    (U, S, Vh) = self.Q_svd_dict[matrix_index]
+                else:
+                    (U, S, Vh) = sp.linalg.svd( self.Qs[:,:, matrix_index],
                                         full_matrices=False, compute_uv=True,
                                         overwrite_a=False, check_finite=False)
+                    self.Q_svd_dict[matrix_index] = (U,S,Vh)
+                    
                 square_root = U * np.sqrt(S)
-                self.Q_svd_dict[matrix_index] = square_root
+                self.Q_square_root_dict[matrix_index] = square_root
 
             return square_root
+        
+        def Q_inverse(self, k, jitter=0.0):
+            """
+            Inverse of the Q matrix
+            Jitter is addad to the diagonal of S matrix
+            """
+            
+            matrix_index = self.reconstruct_indices[k]
+            if matrix_index in self.Q_inverse_dict:
+                Q_inverse = self.Q_inverse_dict[matrix_index]
+            else:
+                if matrix_index in self.Q_svd_dict:
+                    (U, S, Vh) = self.Q_svd_dict[matrix_index]
+                else:
+                    (U, S, Vh) = sp.linalg.svd( self.Qs[:,:, matrix_index],
+                                        full_matrices=False, compute_uv=True,
+                                        overwrite_a=False, check_finite=False)
+                    self.Q_svd_dict[matrix_index] = (U,S,Vh)
+                
+                regularizer = S[0]*jitter if S[0] > jitter else jitter
+                Q_inverse = np.dot( U * ( 1.0/(S + regularizer)) , U.T ) # Assume Q_inv is positive definite
+                #Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
+                Q_inverse = 0.5*(Q_inverse + Q_inverse.T)
+                self.Q_inverse_dict[matrix_index] = Q_inverse
 
+            return Q_inverse
+            
+        
         def return_last(self):
             """
             Function returns last available matrices.
@@ -3073,7 +3147,8 @@ class ContDescrStateSpace(DescreteStateSpace):
     @classmethod
     def _cont_to_discrete_object(cls, X, F, L, Qc, compute_derivatives=False,
                                  grad_params_no=None,
-                                 P_inf=None, dP_inf=None, dF = None, dQc=None):
+                                 P_inf=None, dP_inf=None, dF = None, dQc=None,
+                                 dt0=None):
         """
         Function return the object which is used in Kalman filter and/or
         smoother to obtain matrices A, Q and their derivatives for discrete model
@@ -3110,7 +3185,14 @@ class ContDescrStateSpace(DescreteStateSpace):
         threshold_number_of_unique_time_steps = 20 # above which matrices are separately each time
         dt = np.empty((X.shape[0],))
         dt[1:] = np.diff(X[:,0],axis=0)
-        dt[0]  = 0#dt[1]
+        if dt0 is None:
+            dt[0]  = 0#dt[1]
+        else:
+            if isinstance(dt0,str):
+                dt = dt[1:]
+            else:
+                dt[0] = dt0
+            
         unique_indices = np.unique(np.round(dt, decimals=unique_round_decimals))
         number_unique_indices = len(unique_indices)
 
