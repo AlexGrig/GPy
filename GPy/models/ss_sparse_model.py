@@ -29,8 +29,18 @@ class SparcePrecisionGP(GP):
 
     """
 
-    def __init__(self, X, Y, kernel=None, noise_var=1.0, name='StateSpaceSparse'):
+    def __init__(self, X, Y, kernel=None, noise_var=1.0, balance=False, largest_cond_num=1e+16, regularization_type=2, name='StateSpaceSparse'):
+        """
+        Inputs:
+        ------------------
         
+        balance: bool
+        Whether to balance or not the model as a whole
+        
+        largest_cond_num: float
+         Largest condition number of the Qk and P_inf matices. This is needed because
+            for some models the these matrices are while inverse is required.
+        """
         Model.__init__(self, name) # Call model init. Need to skip call to GP
 
         if len(X.shape) == 1:
@@ -53,6 +63,7 @@ class SparcePrecisionGP(GP):
         assert num_data_Y == self.num_data, "X and Y data don't match"
         assert self.output_dim == 1, "State space methods are for single outputs only"
 
+        self.balance = balance
         # Make sure the observations are ordered in time
         sort_index = np.argsort(X[:,0])
         self.X = X[sort_index,:]
@@ -61,6 +72,10 @@ class SparcePrecisionGP(GP):
         # Noise variance
         self.likelihood = likelihoods.Gaussian(variance=noise_var)
 
+
+        # Need to make an instance
+        self.inference_method = ss.SparsePrecision1DInference()
+        
         # Default kernel
         if kernel is None:
             raise ValueError("State-Space Model: the kernel must be provided.")
@@ -69,7 +84,10 @@ class SparcePrecisionGP(GP):
         # Assert that the kernel is supported
         if not hasattr(self.kern, 'sde'):
             raise NotImplementedError('SDE must be implemented for the kernel being used')            
-            
+        
+        self.largest_cond_num = largest_cond_num
+        self.regularization_type = regularization_type        
+        
         self.link_parameter(self.kern)
         self.link_parameter(self.likelihood)
         self.posterior = None
@@ -89,33 +107,59 @@ class SparcePrecisionGP(GP):
             This method is not designed to be called manually, the framework is set up to automatically call this method upon changes to parameters, if you call
             this method yourself, there may be unexpected consequences.
         """
-        
+        #import pdb; pdb.set_trace()
         log_marginal_ll, d_log_marginal_ll, self._mll_call_tuple, self._mll_call_dict \
             = ss.SparsePrecision1DInference.inference(self.kern, 
-                                                   self.X, self.likelihood, self.Y)
+                                                   self.X, self.Y, self.likelihood , self.balance, self.largest_cond_num,self.regularization_type)
         
         self._log_marginal_likelihood = log_marginal_ll
         self.likelihood.update_gradients(d_log_marginal_ll[-1,0])
         self.kern.sde_update_gradient_full(d_log_marginal_ll[:-1,0])
         
-    def _raw_predict(self, Xnew=None):
+    def _raw_predict(self, Xnew=None, p_balance=None, p_largest_cond_num=None, p_regularization_type=None):
         """
+        Input:
+        ----------------
         
+        p_Inv_jitter: None or float
+            if given it overrides the value saved in the model
         """
+        #import pdb; pdb.set_trace()
         
-        assert Xnew == None, "Currently works only for training data"
-       
-        Kip = self._mll_call_dict['Kip']
-        matrix_blocks = self._mll_call_dict['matrix_blocks']       
+        if p_largest_cond_num is None:
+            largest_cond_num = self.largest_cond_num
+        else:
+            largest_cond_num = p_largest_cond_num
         
-        mean, var = ss.sparse_inference.mean_var_calc(*self._mll_call_tuple, 
-                    Kip=Kip, matrix_blocks=matrix_blocks, matrix_blocks_derivatives=None,
-                    compute_inv_main_diag=True)
+        if p_regularization_type is None:
+            regularization_type = self.regularization_type
+        else:
+            regularization_type = p_regularization_type
+            
+        if p_balance is None:
+            balance = self.balance
+        else:
+            balance = p_balance
+            
+        mean, var, _ = ss.SparsePrecision1DInference.mean_and_var(self.kern, self.X, self.Y, self.likelihood, Xnew, 
+                     balance, largest_cond_num, regularization_type, self._mll_call_tuple, self._mll_call_dict)
                     
         return mean, var
 
-    def predict(self, Xnew, include_likelihood=True):
-        mu, var = self._raw_predict(Xnew)
+    def predict(self, Xnew, include_likelihood=True, balance=None, largest_cond_num=None, regularization_type=None):
+        """
+        For prediction we can redefine some parameters like balance and largest_cond_num.
+        Inputs:
+        ------------------
+        
+        balance: bool
+        Whether to balance or not the model as a whole
+        
+        largest_cond_num: float
+         Largest condition number of the Qk and P_inf matices. This is needed because
+            for some models the these matrices are while inverse is required.
+        """
+        mu, var = self._raw_predict(Xnew, balance, largest_cond_num, regularization_type)
         
         if include_likelihood:
             var += self.likelihood.variance

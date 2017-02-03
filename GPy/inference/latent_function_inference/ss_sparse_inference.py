@@ -2,8 +2,6 @@
 # Licensed under the BSD 3-clause license (see LICENSE.txt)
 
 from .posterior import PosteriorExact as Posterior
-from ...util.linalg import pdinv, dpotrs, tdot
-from ...util import diag
 from ...models import state_space_main as ssm
 from ... import likelihoods
 
@@ -57,18 +55,50 @@ class SparsePrecision1DInference(LatentFunctionInference):
     def __init__(self):
         pass
     
+    diff_x_crit = 1e-14 # if new X_test points are added, this tells when
+                        # to consider new points to be distinct.     
+    
     @staticmethod
-    def inference(kernel, X, likelihood, Y):
+    def inference(kernel, X, Y, var_or_likelihood, p_balance=False, p_largest_cond_num=1e+16, p_regularization_type=2):
         """
-        Returns a Posterior class containing essential quantities of the posterior
+        Returns marginal likelihood (MLL), MLL gradient, and dicts with variaous input matrices.
+        
+        
+        Inputs:
+        ------------------------
+        
+        kernel: kernel object
+        
+        X: array(N,1)
+        
+        Y: array(N,1)
+        
+        var_or_likelihood: either likelihood object or float with noise variance.
+        
+        p_balance: bool
+            Balance general mode or not
+            
+        p_largest_cond_num: float
+            Largest condition number of the Qk matices. See function 
+            "sparse_inverse_cov".
+            
+        p_regularization_type: 1 or 2
+        
         """
         
-        assert isinstance(likelihood, likelihoods.Gaussian), "Likelihood must be Gaussian"
-        
-        noise_var = likelihood.gaussian_variance()
-        
+        if isinstance(var_or_likelihood, likelihoods.Gaussian):
+            noise_var = var_or_likelihood.gaussian_variance()
+        elif isinstance(var_or_likelihood, float):
+            noise_var = var_or_likelihood
+        else:
+            raise ValueError("SparsePrecision1DInference.inference: var_or_likelihood has incorrect type.")
+          
         (F,L,Qc,H,P_inf, P0, dFt,dQct,dP_inft, dP0t) = kernel.sde()
         block_size = F.shape[1]    
+        
+        if p_balance:
+            (F,L,Qc,H,P_inf,P0, dF,dQct,dP_inft,dP0t) = ssm.balance_ss_model(F,L,Qc,H,P_inf,P0, dFt,dQct,dP_inft, dP0t)
+            print("SparsePrecision1DInference.inference: Balancing!")
         
         grad_calc_params = {}
         grad_calc_params['dP_inf'] = dP_inft
@@ -77,8 +107,8 @@ class SparsePrecision1DInference(LatentFunctionInference):
         
         (Ait, Qi, GtY, G, GtG, H, Ki_derivatives, Kip, matrix_blocks, 
          matrix_blocks_derivatives) = sparse_inference.sparse_inverse_cov(X, 
-                Y, F, L, Qc, P_inf, P0, H, compute_derivatives=True,
-                           grad_calc_params=grad_calc_params)
+                Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, compute_derivatives=True,
+                           grad_calc_params=grad_calc_params,p_regularization_type=p_regularization_type)
         
         mll_call_tuple = (block_size, Y, Ait, Qi, GtY, G, GtG, H, noise_var)        
         mll_call_dict = { 'compute_derivatives':True, 'dKi_vector':Ki_derivatives,
@@ -95,22 +125,141 @@ class SparsePrecision1DInference(LatentFunctionInference):
         #test_inverse = sparse_inference.sparse_inv_rhs(n_points, block_size, matrix_blocks, HtH/noise_var, tridiag_inv_data, rhs_block)
         return marginal_ll, d_marginal_ll, mll_call_tuple, mll_call_dict       
 
-
+    @staticmethod
+    def mean_and_var(kernel, X_train, Y_train, var_or_likelihood, X_test=None, p_balance=False, p_largest_cond_num=1e+16,
+                     p_regularization_type=2, mll_call_tuple=None, mll_call_dict=None, diff_x_crit=None):
+        """
+        Computes mean and variance of the posterior.
+        
+        Input:
+        ---------------
+        Same as for inference        
+        
+        X_train: array(N,1) 
+        
+        Y_train: array(N,1) 
+        
+        X_test: array(M,1) or None
+            Test data points.
+        
+        p_balance: bool
+            Balance general mode or not
+        
+        p_largest_cond_num: float
+            Largest condition number of the Qk matices. See function 
+            "sparse_inverse_cov".
+        
+        mll_call_tuple: tuple
+            This is tuple is obtained from the "sparse_inverse_cov" function,
+            and if X_test = None, then it can be reused here.
+        
+        mll_call_dict:
+            Dict obtained from "sparse_inverse_cov" function.
+        
+        diff_x_crit: float (not currently used)   
+            If new X_test points are added, this tells when to consider 
+            new points to be distinct. If it is None then the same variable
+            is taken from the class.
+            
+        p_regularization_type: 1 or 2
+        """        
+        
+        if isinstance(var_or_likelihood, likelihoods.Gaussian):
+            noise_var = var_or_likelihood.gaussian_variance()
+        elif isinstance(var_or_likelihood, float):
+            noise_var = var_or_likelihood
+        else:
+            raise ValueError("SparsePrecision1DInference.inference: var_or_likelihood has incorrect type.")
+        
+        if diff_x_crit is None:
+            diff_x_crit = SparsePrecision1DInference.diff_x_crit
+            
+        train_points_num = X_train.size
+        
+        #import pdb; pdb.set_trace()  
+        if (X_test is None) or (X_test is X_train) or ( (X_test.shape == X_train.shape) and np.all(X_test == X_train) ):
+            # Consider X_test is equal to X_train
+            X_test = None            
+            
+        if X_test is not None:
+            X = np.vstack((X_train, X_test))
+            Y = np.vstack((Y_train, np.zeros(X_test.shape)) )
+            
+            which_test = np.vstack( ( np.ones( X_train.shape), np.zeros( X_test.shape)) )
+            
+            _, return_index, return_inverse = np.unique(X,True,True)
+             
+            X = X[return_index]
+            Y = Y[return_index]
+            which_test = which_test[return_index]
+            predict_only_training = False
+        else:
+            X = X_train
+            Y = Y_train
+            which_test = None
+            predict_only_training = True
+            
+        if (not predict_only_training) or (mll_call_tuple is None):
+            (F,L,Qc,H,P_inf, P0, dFt,dQct,dP_inft, dP0t) = kernel.sde()
+            block_size = F.shape[1]    
+            
+            if p_balance:
+                (F,L,Qc,H,P_inf,P0, dF,dQct,dP_inft,dP0t) = ssm.balance_ss_model(F,L,Qc,H,P_inf,P0, dFt,dQct,dP_inft, dP0t)
+                print("SparsePrecision1DInference.mean_and_var: Balancing!")
+            
+#            grad_calc_params = {}
+#            grad_calc_params['dP_inf'] = dP_inft
+#            grad_calc_params['dF'] = dFt
+#            grad_calc_params['dQc'] = dQct
+            
+            (Ait, Qi, GtY, G, GtG, H, Ki_derivatives, Kip, matrix_blocks, 
+             matrix_blocks_derivatives) = sparse_inference.sparse_inverse_cov(X, 
+                    Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, compute_derivatives=False,
+                               grad_calc_params=None, p_regularization_type=p_regularization_type )
+                           
+            mll_call_tuple = (block_size, Y, Ait, Qi, GtY, G, GtG, H, noise_var)
+            
+#            def sparse_inverse_cov(X, Y, F, L, Qc, P_inf, P0, H, compute_derivatives=False,
+#                           grad_calc_params=None)
+        else:
+            matrix_blocks = mll_call_dict['matrix_blocks']
+            
+        #import pdb; pdb.set_trace()                   
+        mean, var = sparse_inference.mean_var_calc(*mll_call_tuple, 
+                        matrix_blocks, which_observed=which_test, inv_precomputed=None)
+        
+        if (not predict_only_training):    
+            mean = mean[return_inverse]
+            var = var[return_inverse]            
+                        
+            mean = mean[train_points_num:]
+            var = var[train_points_num:]
+            
+        return mean, var, mll_call_tuple
+        
 class sparse_inference(object):
     
     @staticmethod
     #@profile
-    def sparse_inverse_cov(X, Y, F, L, Qc, P_inf, P0, H, compute_derivatives=False,
-                           grad_calc_params=None):
+    def sparse_inverse_cov(X, Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, compute_derivatives=False,
+                           grad_calc_params=None, p_regularization_type=2):
         """
+        Function returns all the necessary matrices for the SpInGP inference.        
         
-        
+         Notation for matrix is: K = A0, B1 0       
+                                    C1, A1, B2
+                                    0 , C2, A2s
+                                    
         Input:
         ------------------------------
             Exactly from furnction kern.sde()
             
             H - row vector
-        
+            
+            p_largest_cond_num: float
+            Largest condition number of the Qk and P_inf matices. This is needed because
+            for some models the these matrices are while inverse is required.
+                
         Output:
         -------------------------------
         
@@ -127,7 +276,11 @@ class sparse_inference(object):
             Required for ll dorivarive computation.
             
         matrix_blocks, 
-        matrix_blocks_derivatives
+        matrix_blocks_derivatives: dictionary
+            Dictionary contains 2 keys: 'dAkd' and 'dCkd'. Each contain corresponding
+                derivatives of matrices Ak and Ck. Shapes dAkd[0:(N-1)] [0:(deriv_num-1),0:(block_size-1), 0:(block_size-1)]
+                    dCkd[0:(N-2)][0:(deriv_num-1), 0:(block_size-1), 0:(block_size-1)]
+        
         """
         block_size = F.shape[0]
         x_points_num = X.shape[0]
@@ -136,6 +289,11 @@ class sparse_inference(object):
         Ait = sparse.lil_matrix( (Ai_size, Ai_size))
         Qi = sparse.lil_matrix( (Ai_size, Ai_size) )
         
+        if not isinstance(p_largest_cond_num, float):
+            raise ValueError('sparse_inference.sparse_inverse_cov: p_Inv_jitter is not float!')
+        
+        Akd = {}
+        Bkd = {}
         if compute_derivatives:
             # In this case compute 2 extra matrices dA/d(Theta) and dQ^{-1}/d(Theta)
         
@@ -167,8 +325,6 @@ class sparse_inference(object):
             Ki_derivatives = [] # Derivatives of the K = At*Qi*A
 
             # Determinant derivatives: (somematrices required for speeding up the computation of determ derivatives)
-            Akd = {}
-            Bkd = {}
             dAkd = {}
             dCkd = {}            
         else:
@@ -180,7 +336,8 @@ class sparse_inference(object):
             Ait_derivatives = None
             Qi_derivatives = None
             Ki_derivatives = None
-        
+            Kip = None
+            
         b_ones = np.eye(block_size)
         
         #GtY = sparse.lil_matrix((Ai_size,1))
@@ -191,30 +348,34 @@ class sparse_inference(object):
         GtG = sparse.kron( sparse.eye(x_points_num, format='csc' ), sparse.csc_matrix( HtH ), format='csc')    
         
         Ait[0:block_size,0:block_size] = b_ones
-        
+        #import pdb; pdb.set_trace()
         P_inf = 0.5*(P_inf + P_inf.T)
+                
+        #p_regularization_type=1
+        #p_largest_cond_num = 1e8
         (U,S,Vh) = la.svd(P_inf, compute_uv=True,)
-        Inv_jitter = 0 #1e-10 # Minimum matrix condition number
-        regularizer = S[0]*Inv_jitter        
+        P_inf_inv = ssm.psd_matrix_inverse(-1, P_inf, U=U,S=S,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
         
-        
-        P_inf_inv = np.dot( U * ( 1.0/(S + regularizer)) , U.T)
-        
+        # Different inverse computation >-
+                    
         Qi[0:block_size,0:block_size] = P_inf_inv
         Qk_inv_prev = P_inf_inv # required for derivative of determinant computations
-        d_Qk_inv_prev = np.empty( (grad_params_no, block_size, block_size) ) # initial derivatives of dQk_inv
         
-        for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
-                dP_inf_p = dP_inf[:,:,dd]            
-                d_Qk_inv_prev[dd,:,:] = -np.dot(P_inf_inv, np.dot(dP_inf_p, P_inf_inv))
-                
+        if compute_derivatives:
+            d_Qk_inv_prev = np.empty( (grad_params_no, block_size, block_size) ) # initial derivatives of dQk_inv
+            
+            for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
+                    dP_inf_p = dP_inf[:,:,dd]            
+                    d_Qk_inv_prev[dd,:,:] = -np.dot(P_inf_inv, np.dot(dP_inf_p, P_inf_inv))
+                    
         for k in range(0,x_points_num-1):
             Ak = AQcomp.Ak(k,None,None)
             Qk = AQcomp.Qk(k)
             Qk = 0.5*(Qk + Qk.T) # symmetrize because if Qk is not full rank it becomes not symmetric due to numerical problems
-            Qk_inv = AQcomp.Q_inverse(k, jitter = Inv_jitter)
+            #import pdb; pdb.set_trace()
+            Qk_inv = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type)
             if np.any((np.abs(Qk_inv - Qk_inv.T)) > 0):
-                pass
+                raise ValueError('sparse_inverse_cov: Qk_inv is not symmetric!')
             
             row_ind_start = (k+1)*block_size
             row_ind_end = row_ind_start + block_size
@@ -224,9 +385,12 @@ class sparse_inference(object):
             Ait[col_ind_start:col_ind_end, row_ind_start:row_ind_end] = -Ak.T
             Ait[row_ind_start:row_ind_end, row_ind_start:row_ind_end] = b_ones        
             Qi[row_ind_start:row_ind_end, row_ind_start:row_ind_end] = Qk_inv
-         
-            #GtY[row_ind_start + H_nonzero_inds,0] = Y[k+1,0]* Hnn     
             
+            #import pdb; pdb.set_trace()
+            #GtY[row_ind_start + H_nonzero_inds,0] = Y[k+1,0]* Hnn     
+            Bkd[k] = - np.dot( Ak.T, Qk_inv )
+            Akd[k] = np.dot( Ak.T, np.dot( Qk_inv, Ak ) ) +  Qk_inv_prev
+                
             if compute_derivatives:
                 if (k == 0):
                     prev_Ak = Ak # Ak from the previous step
@@ -251,9 +415,6 @@ class sparse_inference(object):
                     Kip[col_ind_start:col_ind_end, row_ind_start:row_ind_end] = curr_off_diag.T
                     
                     prev_diag = curr_diag
-                    
-                Bkd[k] = - np.dot( Ak.T, Qk_inv )
-                Akd[k] = np.dot( Ak.T, np.dot( Qk_inv, Ak ) ) +  Qk_inv_prev
                 
                 dAkd_k = np.empty( (grad_params_no, block_size, block_size) )
                 dCkd_k = np.empty( (grad_params_no, block_size, block_size) )
@@ -292,8 +453,8 @@ class sparse_inference(object):
         Ait = Ait.asformat('csc')
         #Bkd[k] = - np.dot( Ak.T, Qk_inv )
         
-        if compute_derivatives:
-            Akd[x_points_num-1] = Qk_inv_prev # set the last element of the matrix             
+        Akd[x_points_num-1] = Qk_inv_prev # set the last element of the matrix        
+        if compute_derivatives:                 
             dAkd[x_points_num-1] = d_Qk_inv_prev # set the last element of the matrix
             
             for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
@@ -323,8 +484,9 @@ class sparse_inference(object):
         matrix_blocks_derivatives = {}
         matrix_blocks['Akd'] = Akd
         matrix_blocks['Bkd'] = Bkd
-        matrix_blocks_derivatives['dAkd'] = dAkd
-        matrix_blocks_derivatives['dCkd'] = dCkd
+        if compute_derivatives:
+            matrix_blocks_derivatives['dAkd'] = dAkd
+            matrix_blocks_derivatives['dCkd'] = dCkd
         
         return Ait, Qi, GtY, G, GtG, H, Ki_derivatives, Kip, matrix_blocks, matrix_blocks_derivatives
 
@@ -333,6 +495,9 @@ class sparse_inference(object):
                     compute_derivatives=False, dKi_vector=None, Kip=None,
                     matrix_blocks=None, matrix_blocks_derivatives=None):
         """
+        Function computes  marginal likelihood and its derivatives.        
+        
+        Inputs are mostly the necessary matrices obtained from the function "sparse_inverse_cov".
         Input:        
         -----------------------
         compute_inv_main_diag: bool
@@ -391,7 +556,8 @@ class sparse_inference(object):
         KiN_factor = analyzed_factor._clone()
         
         if measure_timings: t1 = time.time()
-        Ki_factor.cholesky_inplace(Ki)
+        # Ki_factor.cholesky_inplace(Ki) # There we error sometimes here, hence substitute to equivalent
+        Ki_factor.cholesky_inplace(Qi)
         if measure_timings: meas_times[3] = time.time() - t1
             
         # Check 1 ->
@@ -489,6 +655,8 @@ class sparse_inference(object):
         if measure_timings: t1 = time.time()
         mll_log_det = -Ki_factor.logdet()# ignoring 0.5 and - sign.
         mll_log_det += KiN_factor.logdet() + (Y.size)*np.log(g_noise_var)
+        if np.isnan(mll_log_det):
+            raise ValueError("marginal ll: mll_log_det is None")
         
         KiNGtY = KiN_factor.solve_A(GtY)
         
@@ -538,10 +706,20 @@ class sparse_inference(object):
             if measure_timings: t2 = time.time() # TODO maybe reimplement by stacking
             #d_determ, det_for_test = sparse_inference.second_deriv_determinant( data_num, 
             #            block_size, KiN, HtH, g_noise_var, dKi_vector, determ_derivatives)
+
+# Use function deriv_determinant ->            
             (d_determ, det_for_test, tmp_inv_data) = sparse_inference.deriv_determinant( data_num, \
                                  block_size, HtH, g_noise_var, \
-                                 matrix_blocks, compute_derivatives=True, deriv_num=deriv_number, \
+                                 matrix_blocks, None, compute_derivatives=True, deriv_num=deriv_number, \
                                  matrix_derivs=matrix_blocks_derivatives, compute_inv_main_diag=False)
+# Use function deriv_determinant <-
+                                 
+# Use function deriv_determinant2 ->                                 
+#            (d_determ, det_for_test, tmp_inv_data) = sparse_inference.deriv_determinant2( data_num, block_size, HtH, g_noise_var, 
+#                                 matrix_blocks, None, matrix_blocks_derivatives, None,
+#                                 compute_inv_diag=False, add_noise_deriv=True)
+# Use function deriv_determinant2 <-                                 
+                                 
             d_marginal_ll += -0.5* d_determ[:,np.newaxis]
             
             if measure_timings: meas_times[9].append(time.time() - t2)
@@ -575,43 +753,77 @@ class sparse_inference(object):
     
     @staticmethod
     def mean_var_calc(block_size, Y, Ait, Qi, GtY, G, GtG, H, g_noise_var, 
-                    Kip, matrix_blocks, matrix_blocks_derivatives=None,
-                    compute_inv_main_diag=True):
+                    matrix_blocks, which_observed=None, inv_precomputed=None):
         """
         Input:        
         -----------------------
-        compute_inv_main_diag: bool
-            Whether to compute intermidiate data for inversion of sparse
-            tridiagon precision. This is needed for further variance calculation.
-            For marginal likelihood and its gradient it is not required.
+        block_size: int
+            Size of the block
+            
+        Y: array(N,1)
+            1D-array.  For test points there are zeros in corresponding positions.
+            In the same positions where zeros are in which_observed.
         
-        Kip: sparce
+        Ait, Qi, GtY, G, GtG, H: matrices
+            Matrix data
+        
+        g_noise_var: float
+            Noise variance
+            
+        matrix_blocks: dict
+            Data with matrices info past directly into deriv_determinant.
+        
+        which_observed: None, or array(N,1) or array(1,N) or array(N,) 
+            Array consisting of zeros and ones. Ones are in the position of
+            training points (observed), zeros are in the position of 
+            test points (not observed). If None, then all observed.
+            Affects whether we add or not a diagonal.
+            
+        inv_precomputed: 
+            What determinant computation function returns.
+        
+        Kip: sparce (not used anymore)
             Block diagonal matrix. The diagonal blocks are the same as in K.
             Required for ll derivarive computation.
         """
         g_noise_var = float(g_noise_var)
         HtH = np.dot(H.T, H)
         data_num = Y.shape[0]        
-        
+        #import pdb; pdb.set_trace()
         Ki = Ait*Qi*Ait.T # Precision(inverse covariance) without noise
         Ki = 0.5*(Ki + Ki.T)
-        KiN = Ki +  GtG /g_noise_var# Precision with a noise
+        
+#        last_data_points = 0
+#        diagg = np.ones((data_num,)); diagg[-last_data_points:] = 0
+#        g_noise_var_to_det = diagg * g_noise_var; g_noise_var_to_det[-last_data_points:] = np.inf
+#        GtG2 = sparse.kron( sparse.csc_matrix(np.diag(diagg)), sparse.csc_matrix( HtH ), format='csc')    
+#        KiN = Ki +  GtG2 /g_noise_var# Precision with a noise
+        if which_observed is not None:
+            tmp1 = sparse.csc_matrix( G.T * sparse.csr_matrix( np.diag(np.squeeze(which_observed/g_noise_var)) ) )
+            GtG = tmp1 * G
+            
+            GtNY = tmp1*sparse.csc_matrix(Y)
+        
+        else:
+            GtG  = GtG/g_noise_var # Precision with a noise
+            
+            GtNY = GtY/g_noise_var
+            
+        KiN = Ki +  GtG
         
         analyzed_factor = cholmod.analyze(KiN) # perform only once this operation
                                               # since this is expensive?  
                 
         KiN_factor = analyzed_factor._clone()
-        Ki_factor = analyzed_factor._clone()
-        
-        Ki_factor.cholesky_inplace(Ki, beta=0)   
         KiN_factor.cholesky_inplace(KiN, beta=0)        
         
-        KiNGtY = KiN_factor.solve_A(GtY)
+        KiNGtY = KiN_factor.solve_A(GtNY)
         
-        _, _, inv_precomputed = sparse_inference.deriv_determinant( data_num, \
-                             block_size, HtH, g_noise_var, \
-                             matrix_blocks, compute_derivatives=False, deriv_num=None, \
-                             matrix_derivs=None, compute_inv_main_diag=True)
+        if inv_precomputed is None:
+            _, _, inv_precomputed = sparse_inference.deriv_determinant( data_num, \
+                                 block_size, HtH, g_noise_var, \
+                                 matrix_blocks, which_observed, compute_derivatives=False, deriv_num=None, \
+                                 matrix_derivs=None, compute_inv_main_diag=True)
         
         #import pdb; pdb.set_trace()          
         # compute extra matrix which required in covariance ->
@@ -631,6 +843,9 @@ class sparse_inference(object):
         # compute extra matrix which required in covariance <-
         
 #        # other (straightforward) result diag (test) ->
+        #Ki_factor = analyzed_factor._clone()        
+        #Ki_factor.cholesky_inplace(Ki, beta=0) 
+        
 #        # diagonal part of the variance
 #        diag_var = (G*tmp10*sparse.csc_matrix( np.ones( (data_num,1) ) )).toarray()
 #        
@@ -644,25 +859,257 @@ class sparse_inference(object):
 #        # other (straightforward) result diag (test) <-
         
         # Compute mean
-        mean_rhs = sparse.csc_matrix(Y/g_noise_var) - G*KiNGtY/g_noise_var**2
-        mean = (G*Ki_factor.solve_A( Gt*mean_rhs)).toarray()
+        #mean_rhs = sparse.csc_matrix(Y/g_noise_var) - G*KiNGtY/g_noise_var # first term in this formula is incorrect. Need to account for inf. vars
+        #mean = (G*Ki_factor.solve_A( Gt*mean_rhs)).toarray()
+        
+        mean2 = (G*KiNGtY).toarray()
+        #import pdb; pdb.set_trace()   
         #Compute variance
         result_diag = sparse_inference.sparse_inv_rhs(data_num, block_size, 
-                        matrix_blocks, HtH/g_noise_var , H, inv_precomputed, cov_calc_rhs) 
-                
+                        matrix_blocks, HtH/g_noise_var , H, inv_precomputed, cov_calc_rhs,
+                        which_observed) 
+        
         #!!! HtH - H in sparse_inverse_cov and marginal_ll
         # One extra input in sparse_inv_rhs
+                       
+        return mean2, result_diag
+    
+
+
+    @staticmethod
+    #@profile
+    def deriv_determinant2( points_num, block_size, HtH, g_noise_var, 
+                                 matrix_data, rhs_matrix_data, front_multiplier, which_observed=None,
+                                 compute_inv_diag=False, add_noise_deriv=False):
+        """
+        This function is a different implementation of determinant term 
+        (and its derivaives) in GP 
+        marginal likelihood. It uses the formula d(log_det)/d (Theta) = Trace[ K d(K)\d(Theta)]
+        Matrix K is assumed block tridiagonal, K^{-1} is sparse. Essentially what the function does:
+        it compues the diagonal of (K d(K)\d(Theta) ). Having a diagonal it computes a trace. 
         
-        return mean, result_diag
-                                                
+        Right now the summetricity assumption is used, but in general the method
+        works for nonsymmetrix block tridiagonal matrices as well.        
+        
+        This function works for multiple rhs matrices so that all the dirivatives are computed at once!!!
+        
+        Notation for matrix is: K = A0, B1 0       
+                                    C1, A1, B2
+                                    0 , C2, A2
+        Input:
+        -----------------------------------
+        
+        points_num: int
+            Number blocks
+            
+        block_size: int
+            Size of the block            
+        
+        HtH: matrix (block_size, block_size)
+            Constant matrix added to the diagonal blocks. It is divieded by g_noise_var
+        
+        g_noise_var: float
+            U sed in connection with previous parameter for modify main diagonal blocks
+            
+        matrix_data: dictionary
+            It is supposed to contain 2 keys: 'Ak' and 'Bk'. Each of those
+            contain dictionary for main diagonal and upper-main diagonal.
+            They are accessible by indices matrix_data['Ak'][0:points_num],
+            matrix_data['Bk'][0:(points_num-1)]
+            
+        rhs_matrix_data: disctionary
+            The same format as in "matrix_data".
+            
+        front_multiplier: (block_size, k). k- any matrix
+            Matrix by which the whole expession K^{-1}D is multiplied in front.
+            Actually, small block of this matrix.
+        
+         which_observed: None, or array(N,1) or array(1,N) or array(N,) 
+            Array consisting of zeros and ones. Ones are in the position of
+            training points (observed), zeros are in the position of 
+            test points (not observed). If None, then all observed.
+            Affects whether we add or not a diagonal.
+            
+        add_noise_deriv: bool
+            Whether determinant noise derivative is computed. In this case, add one more derivative
+                wrt noise. dAkd have the derivative HtH wrt noise. dCkd have zero.
+        
+        deriv_num: int
+            Number of derivatives
+        
+        Output:
+        -------------------------------------
+        
+        d_determinant: array(deriv_num,1) or None       
+            Derivative of the determiant or None (if compute_derivatives == False)            
+        
+        determinant: float
+            Determiant
+        """
+        
+        Akd = matrix_data['Akd']
+        Bkd = matrix_data['Bkd']
+        
+        rhs_Akd = rhs_matrix_data['dAkd']
+        rhs_Ckd = rhs_matrix_data['dCkd']
+         # Convert input matrices to 
+        #HtH = HtH.toarray()
+        inversion_comp={}; inversion_comp['d_l'] = {}; inversion_comp['d_r'] = {}
+        inversion_comp['rhs_diag_d'] = {}; inversion_comp['rhs_diag_u'] = {}
+        
+        if which_observed is None:
+            which_observed = np.ones( points_num )
+        else:
+            which_observed = np.squeeze(which_observed )
+        
+        HtH_zero = np.zeros( HtH.shape )
+        extra_diag = lambda k: HtH if (which_observed[k] == 1) else HtH_zero
+        
+        prev_Lambda = Akd[0] + extra_diag(0)/g_noise_var #KiN[0:block_size, 0:block_size].toarray() #Akd[0] + HtH/g_noise_var
+        prev_Lambda_back = Akd[ (points_num-1) ] + extra_diag((points_num-1))/g_noise_var
+        
+        determinant = 0
+        d_determinant = None
+        deriv_num = rhs_Akd[0].shape[0]
+        if add_noise_deriv:
+            deriv_num += 1
+            
+        d_determinant = np.zeros( (deriv_num,) )
+            
+        rhs_Ck = np.zeros( (deriv_num, block_size, block_size ) )
+        rhs_Ak = np.zeros( (deriv_num, block_size, block_size ) )
+        rhs_Ck_back = np.zeros( (deriv_num, block_size, block_size ) )
+        rhs_Ak_back = np.zeros( (deriv_num, block_size, block_size ) )
+        
+        # In our notation the matrix consist of lower diagonal: C1, C1,...
+        # main diagonal: A0, A1, A2..., and upper diagonal: B1, B2,...        
+        # In this case the matrix is symetric.
+        
+        for i in range(0, points_num): # first point was for initialization
+        
+            (LL, cc) = la.cho_factor(prev_Lambda, lower = True)
+            (LL1, cc1) = la.cho_factor(prev_Lambda_back, lower = True)
+            
+    
+            inversion_comp['d_l'][i] = prev_Lambda 
+            inversion_comp['d_r'][points_num-i-1] = prev_Lambda_back
+                   
+            determinant += 2*np.sum( np.log(np.diag(LL) ) ) # new
+            
+            # HELP 2 ->            
+            # If we want to stack separate matrices in one dimansion
+            # e. g. A(n,m,m) -> A(m, m*n), we use:
+            # B = A.swapaxes(1,0).reshape(m,m*n)
+            
+            # If we want to transform back:
+            # A = B.reshape(m,n,m).swapaxes(1,0)           
+
+            if (i==points_num-1):
+                break
+                # Future points are not computed any more
+            
+            Bk = Bkd[i]# KiN[ind_start_lower:ind_end_lower, ind_start_higher:ind_end_higher].toarray() # Bkd[i]#
+            Ak = Akd[i+1]+ extra_diag(i+1)/g_noise_var# KiN[ind_start_higher:ind_end_higher, ind_start_higher:ind_end_higher].toarray() #Akd[i+1]+ HtH/g_noise_var#
+            
+            Bk_back = Bkd[points_num-i-2] 
+            Ak_back = Akd[points_num-i-2]+ extra_diag(points_num-i-2)/g_noise_var            
+            if add_noise_deriv:
+                rhs_Ck[0:-1,:,:] = rhs_Ckd[i];
+                rhs_Ak[0:-1,:,:] = rhs_Akd[i+1]; rhs_Ak[-1,:,:] = extra_diag(i+1)
+                
+                rhs_Ck_back[0:-1,:,:] = rhs_Ckd[points_num-i-2]
+                rhs_Ak_back[0:-1,:,:] = rhs_Akd[points_num-i-2]; rhs_Ak_back[-1,:,:] = extra_diag(points_num-i-2)
+            else:
+                rhs_Ck = rhs_Ckd[i]; 
+                rhs_Ak = rhs_Akd[i+1]
+                
+                rhs_Ck_back = rhs_Ckd[points_num-i-2]
+                rhs_Ak_back = rhs_Akd[points_num-i-2]
+
+            # Compute rhs_Ak_tmp part ->
+            tmp1 = np.transpose(rhs_Ck, (0,2,1) ) # first transpoce Ck to make it Bk
+            tmp1 = tmp1.swapaxes(1,0).reshape(block_size,block_size*deriv_num) # solve a system
+            # Compute rhs_Ak_tmp part <-
+            
+            # Compute rhs_Ak_back_tmp part ->
+            tmp2 = rhs_Ck_back.swapaxes(1,0).reshape(block_size,block_size*deriv_num) # solve a system 
+            # Compute rhs_Ak_back_tmp part <-
+            
+            # for doing every derivative simultaneously.
+            rhs_Ak_tmp = rhs_Ak.swapaxes(1,0).reshape(block_size,block_size*deriv_num)
+            rhs_Ak_back_tmp = rhs_Ak_back.swapaxes(1,0).reshape(block_size,block_size*deriv_num)
+            
+            inversion_comp['rhs_diag_d'][i+1] = rhs_Ak_tmp - np.dot( Bk.T, la.cho_solve((LL, cc), tmp1 ) ) #tmp1
+            inversion_comp['rhs_diag_u'][points_num-i-2] = rhs_Ak_back_tmp - np.dot( Bk, la.cho_solve((LL1, cc1), tmp2 ) ) 
+            
+            if i == 0: # incert necessary matrices for the first and last points
+                rhs_Ak[0:-1,:,:] = rhs_Akd[0]; rhs_Ak[-1,:,:] = extra_diag(0)
+                inversion_comp['rhs_diag_d'][0] = rhs_Ak.swapaxes(1,0).reshape(block_size,block_size*deriv_num) # forward transform
+                
+                rhs_Ak[0:-1,:,:] = rhs_Akd[points_num-1]; rhs_Ak[-1,:,:] = extra_diag(points_num-1)
+                inversion_comp['rhs_diag_u'][points_num-1] = rhs_Ak.swapaxes(1,0).reshape(block_size,block_size*deriv_num)  # forward transform
+        
+            
+            prev_Lambda_inv_term = la.cho_solve((LL, cc), Bk) # new            
+            Lambda = Ak - np.dot(Bk.T, prev_Lambda_inv_term)
+            prev_Lambda = Lambda # For the next step
+        
+            prev_Lambda_inv_term1 = la.cho_solve((LL1, cc1), Bk_back.T) # new 
+            Lambda_back = Ak_back - np.dot( Bk_back, prev_Lambda_inv_term1)             
+            prev_Lambda_back = Lambda_back
+            del prev_Lambda_inv_term1, prev_Lambda_inv_term
+        
+        if front_multiplier is None:
+            new_block_size = block_size
+        else:
+            new_block_size = front_multiplier.shape[0]
+   
+        Akd = matrix_data['Akd']
+        d_l = inversion_comp['d_l']
+        d_r = inversion_comp['d_r']
+        d_d = inversion_comp['rhs_diag_d']
+        d_u = inversion_comp['rhs_diag_u']        
+        
+        #result_diag = np.empty( (points_num*new_block_size, d_2 ) )
+        #import pdb; pdb.set_trace()
+        inv_diag = {}
+        for i in range(0, points_num):
+            #start_ind = block_size*i
+            
+            #lft = np.tile(np.eye( block_size), (deriv_num,) ) - d_d[i] - d_u[i]
+            if add_noise_deriv:
+                #rhs_Ck[0:-1,:,:] = rhs_Ckd[i];
+                rhs_Ak[0:-1,:,:] = rhs_Akd[i]; rhs_Ak[-1,:,:] = extra_diag(i)
+            else:
+                rhs_Ak = rhs_Akd[i]
+            tmp1 = rhs_Ak.swapaxes(1,0).reshape(block_size,block_size*deriv_num)
+            
+            lft =  -tmp1 + d_d[i] + d_u[i]            
+            
+            tmp = np.linalg.solve( -Akd[i] - extra_diag(i)/g_noise_var + d_l[i] + d_r[i], lft )
+            
+            tmp = tmp.reshape(block_size,deriv_num,block_size).swapaxes(1,0) # inverse transformation
+            # Temporarily block the return of diagonal because we have several diagonals
+            
+            d_determinant += np.trace(tmp, axis1 = 1, axis2=2)
+            inv_diag[i] = tmp[0, :, :]            
+            
+        if add_noise_deriv:
+            d_determinant[-1] = -d_determinant[-1] / (g_noise_var**2)
+                
+        return d_determinant, determinant, inversion_comp
+
+                                    
     @staticmethod
     #@profile
     def deriv_determinant( points_num, block_size, HtH, g_noise_var, 
-                                 matrix_data, compute_derivatives=False, deriv_num=None, 
+                                 matrix_data, which_observed=None, compute_derivatives=False, deriv_num=None, 
                                  matrix_derivs=None, compute_inv_main_diag=False):
         """
         This function computes the log_detarminant,its derivatives: d_log_determinant,
         and 3 diagonals (not implemented) of the inverse of SYMMETRIC BLOCK TRIDIAGONAL MATRIX.
+        
+        It uses the method of differentiating the recursive formula for determinant.
         
         Right now the summetricity assumption is used, but in general the method
         works for nonsymmetrix block tridiagonal matrices as well.        
@@ -690,7 +1137,13 @@ class sparse_inference(object):
             contain dictionary for main diagonal and upper-main diagonal.
             They are accessible by indices matrix_data['Ak'][0:points_num],
             matrix_data['Bk'][0:(points_num-1)]
-        
+            
+        which_observed: None, or array(N,1) or array(1,N) or array(N,) 
+            Array consisting of zeros and ones. Ones are in the position of
+            training points (observed), zeros are in the position of 
+            test points (not observed). If None, then all observed.
+            Affects whether we add or not a diagonal.
+            
         compute_derivatives: bool
             Whether to compute determinant derivatives
         
@@ -724,8 +1177,23 @@ class sparse_inference(object):
         Akd = matrix_data['Akd']
         Bkd = matrix_data['Bkd']
          # Convert input matrices to 
-        #HtH = HtH.toarray()        
-        prev_Lambda = Akd[0] + HtH/g_noise_var #KiN[0:block_size, 0:block_size].toarray() #Akd[0] + HtH/g_noise_var
+        #HtH = HtH.toarray()
+        if isinstance(g_noise_var, np.ndarray):
+            noise_vector = True
+            noise_var = g_noise_var[0]
+        else:
+            noise_vector = False
+            noise_var = g_noise_var
+        
+        if which_observed is None:
+            which_observed = np.ones( points_num )
+        else:
+            which_observed = np.squeeze(which_observed )
+        
+        HtH_zero = np.zeros( HtH.shape )
+        extra_diag = lambda k: HtH if (which_observed[k] == 1) else HtH_zero
+        
+        prev_Lambda = Akd[0] + extra_diag(0)/noise_var #KiN[0:block_size, 0:block_size].toarray() #Akd[0] + HtH/g_noise_var
         
         determinant = 0
         d_determinant = None
@@ -741,24 +1209,24 @@ class sparse_inference(object):
             #for j in range(0,deriv_num-1):
             #    prev_d_Lambda[j, :, :] = dKi_vector[j][0:block_size, 0:block_size].toarray()
             prev_d_Lambda[0:-1,:,:] = dAkd[0] # new
-            prev_d_Lambda[-1, :, :] = HtH # (-HtH/g_noise_var**2) # HtH # new
+            prev_d_Lambda[-1, :, :] = extra_diag(0) # (-HtH/g_noise_var**2) # HtH # new
         
         inversion_comp = None
         if compute_inv_main_diag:
-            
+                
             inversion_comp={}; inversion_comp['d_l'] = {}; inversion_comp['d_r'] = {}
-            prev_Lambda_back = Akd[ (points_num-1) ] + HtH/g_noise_var
+            prev_Lambda_back = Akd[ (points_num-1) ] + extra_diag((points_num-1))/noise_var
         
         # In our notation the matrix consist of lower diagonal: C1, C1,...
         # main diagonal: A0, A1, A2..., and upper diagonal: B1, B2,...        
         # In this case the matrix is symetric.
         
         for i in range(0, points_num): # first point was for initialization
-        
+            #import pdb; pdb.set_trace()
             (LL, cc) = la.cho_factor(prev_Lambda, lower = True)
             #KiN_ldet += np.log( la.det( prev_Lambda) ) # old         
             determinant += 2*np.sum( np.log(np.diag(LL) ) ) # new
-            
+                
             if compute_derivatives:
                 # HELP 2 ->            
                 # If we want to stack separate matrices in one dimansion
@@ -784,7 +1252,7 @@ class sparse_inference(object):
                 inversion_comp['d_l'][i] = prev_Lambda 
                 inversion_comp['d_r'][points_num-i-1] = prev_Lambda_back
                 
-                
+            #print(i)
             if (i==points_num-1):
                 break
                 # Future points are not computed any more
@@ -793,9 +1261,11 @@ class sparse_inference(object):
 #            ind_end_higher = ind_start_higher + block_size
 #            ind_start_lower = i*block_size            
 #            ind_end_lower = ind_start_lower + block_size
-            
+            if noise_vector:
+                noise_var = g_noise_var[i+1]
+                
             Bk = Bkd[i]# KiN[ind_start_lower:ind_end_lower, ind_start_higher:ind_end_higher].toarray() # Bkd[i]#
-            Ak = Akd[i+1]+ HtH/g_noise_var# KiN[ind_start_higher:ind_end_higher, ind_start_higher:ind_end_higher].toarray() #Akd[i+1]+ HtH/g_noise_var#
+            Ak = Akd[i+1]+ extra_diag(i+1)/noise_var# KiN[ind_start_higher:ind_end_higher, ind_start_higher:ind_end_higher].toarray() #Akd[i+1]+ HtH/g_noise_var#
             
             #for j in range(0,deriv_num-1):
                 
@@ -808,7 +1278,7 @@ class sparse_inference(object):
             
             if compute_inv_main_diag:
                 Bk = Bkd[points_num-i-2] 
-                Ak = Akd[points_num-i-2]+ HtH/g_noise_var
+                Ak = Akd[points_num-i-2]+ extra_diag(points_num-i-2)/noise_var
             
                 prev_Lambda_inv_term1 = la.cho_solve((LL1, cc1), Bk.T) # new 
             
@@ -820,7 +1290,7 @@ class sparse_inference(object):
             if compute_derivatives:
                 dCk[0:-1, :, :] = dCkd[i] # new
                 dAk[0:-1, :, :] = dAkd[i+1] # new
-                dAk[-1, :, :] = HtH # -HtH/g_noise_var**2 # new # HtH
+                dAk[-1, :, :] = extra_diag(i+1) # -HtH/g_noise_var**2 # new # HtH
             
                 # HELP 1 ->
                 # If we have 3d-array A(n, m, m) and want to multiply by B(m, m) n times:
@@ -846,6 +1316,8 @@ class sparse_inference(object):
                 prev_d_Lambda = d_Lambda # For the next step
         
         if compute_derivatives:
+            if noise_vector:
+                raise NotImplemented
             d_determinant[-1] = -d_determinant[-1] / (g_noise_var**2)
                 
         return d_determinant, determinant, inversion_comp
@@ -853,10 +1325,10 @@ class sparse_inference(object):
     @staticmethod    
     def sparse_inv_rhs(points_num, block_size, matrix_data, 
                        extra_matrix_block_diag, front_multiplier, 
-                       inversion_comp, rhs):
+                       inversion_comp, rhs, which_observed=None):
         """
         Function computes diagonal blocks of the (inverse tri-diag times matrix)
-        given some precalculated data in the function 'second_deriv_determinant' and
+        given some precalculated data in the function 'deriv_determinant' and
         passed in 'inversion_comp'.
         
         Inputs:
@@ -870,6 +1342,7 @@ class sparse_inference(object):
             contain dictionary for main diagonal and upper-main diagonal.
             They are accessible by indices matrix_data['Ak'][0:points_num],
             matrix_data['Bk'][0:(points_num-1)]
+            
         extra_matrix_block_diag: matrix(block_size, block_size)
             On each iteration this matrix is added to the diagonal block.
             It is typically HtH/g_noise_var.
@@ -878,9 +1351,15 @@ class sparse_inference(object):
             On each iteration this matrix is multiplied by the result of the inversion
             
         rhs: matrix(block_size, block_size) or matrix(block_size*points_num, block_size)
-            If it is larger matrix then blocks are in given in a column.
-            If it matrix then it is assumed that all blocks are the same and only one is given.
+            If it is a larger matrix then blocks are in given in a column.
+            If it smaller matrix then it is assumed that all blocks are the same and only one is given.
         
+        which_observed: None, or array(N,1) or array(1,N) or array(N,) 
+            Array consisting of zeros and ones. Ones are in the position of
+            training points (observed), zeros are in the position of 
+            test points (not observed). If None, then all observed.
+            Affects whether we add or not a diagonal.
+            
         Output:
         -----------------------
         """
@@ -892,7 +1371,14 @@ class sparse_inference(object):
             rhs_small=False
         else:
             raise ValueError("sparse_inv_rhs: Incorrect rhs.")
-   
+        
+        if which_observed is None:
+            which_observed = np.ones( points_num )
+        else:
+            which_observed = np.squeeze(which_observed )
+        
+        HtH_zero = np.zeros( extra_matrix_block_diag.shape )
+        extra_diag = lambda k: extra_matrix_block_diag if (which_observed[k] == 1) else HtH_zero
    
         if front_multiplier is None:
             new_block_size = block_size
@@ -910,8 +1396,8 @@ class sparse_inference(object):
                 lft = rhs
             else:
                 lft = rhs[start_ind:start_ind+block_size, :]
-            
-            tmp = np.linalg.solve( -Akd[i] - extra_matrix_block_diag + d_l[i] + d_r[i], lft )
+
+            tmp = np.linalg.solve( -Akd[i] - extra_diag(i) + d_l[i] + d_r[i], lft )
             
             start_ind2 = new_block_size*i
             if front_multiplier is None:

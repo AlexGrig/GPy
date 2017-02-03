@@ -12,6 +12,8 @@ import numpy as np
 import scipy as sp
 import scipy.linalg as linalg
 
+import warnings
+
 try:
     from . import state_space_setup
     setup_available = True
@@ -40,6 +42,10 @@ if print_verbose:
         print("state_space: cython is used")
     else:
         print("state_space: cython is NOT used")
+
+# When debugging external module can set some value to this variable (e.g.)
+# 'model' and in this module this variable can be seen.s
+tmp_buffer = None
 
 
 class Dynamic_Callables_Python(object):
@@ -227,7 +233,7 @@ class R_handling_Python(Measurement_Callables_Class):
         self.R_square_root = {}
 
     def Rk(self, k):
-        return self.R[:, :, self.index[self.R_time_var_index, k]]
+        return self.R[:, :, int(self.index[self.R_time_var_index, k])]
 
     def dRk(self, k):
         if self.dR is None:
@@ -305,7 +311,7 @@ class Std_Measurement_Callables_Python(R_handling_Class):
             P: parameter for Jacobian, usually covariance matrix.
         """
 
-        return self.H[:, :, self.index[self.H_time_var_index, k]]
+        return self.H[:, :, int(self.index[self.H_time_var_index, k])]
 
     def dHk(self, k):
         if self.dH is None:
@@ -2368,6 +2374,7 @@ class ContDescrStateSpace(DescreteStateSpace):
             self.Q_square_root_computed = False
             self.Q_inverse_computed = False
             self.Q_svd_computed = False
+            self.Q_eigen_computed = False
             return self
 
         def Ak(self,k,m,P):
@@ -2388,6 +2395,7 @@ class ContDescrStateSpace(DescreteStateSpace):
 
         def Q_srk(self,k):
             """
+            Check square root, maybe rewriting for Spectral decomposition is needed.
             Square root of the noise matrix Q
             """
 
@@ -2410,12 +2418,32 @@ class ContDescrStateSpace(DescreteStateSpace):
 
             return square_root
         
-        def Q_inverse(self, k, jitter=0.0):        
+        def Q_inverse(self, k, p_largest_cond_num, p_regularization_type):        
             """
-            Inverse of the Q matrix.
-            Jitter is added to the diagonal of S if required.
+            Function inverts Q matrix and regularizes the inverse.
+            Regularization is useful when original matrix is badly conditioned.
+            Function is currently used only in SparseGP code.
+            
+            Inputs:
+            ------------------------------
+            k: int
+            Iteration number.
+            
+            p_largest_cond_num: float
+            Largest condition value for the inverted matrix. If cond. number is smaller than that
+            no regularization happen.
+            
+            regularization_type: 1 or 2
+            Regularization type.
+            
+            regularization_type: int (1 or 2)
+            
+                type 1: 1/(S[k] + regularizer) regularizer is computed
+                type 2: S[k]/(S^2[k] + regularizer) regularizer is computed
             """
             
+            #import pdb; pdb.set_trace()
+                    
             if ((self.last_k == k) and (self.last_k_computed == True)):
                 if not self.Q_inverse_computed:
                     if not self.Q_svd_computed:
@@ -2424,16 +2452,19 @@ class ContDescrStateSpace(DescreteStateSpace):
                         self.Q_svd_computed = True
                     else:
                         (U, S, Vh) = self.Q_svd
-                        
-                    Q_inverse = np.dot( Vh.T * ( 1.0/(S + jitter)) , U.T ) 
-                    self.Q_inverse_computed = True
-                    self.Q_inverse = Q_inverse
-                else:
-                    Q_inverse = self.Q_inverse
-            else:
-                raise ValueError("Inverse of Q can not be computed")
 
-            return Q_inverse
+                    Q_inverse_r = psd_matrix_inverse(k, 0.5*(self.v_Qk + self.v_Qk.T), U,S, p_largest_cond_num, p_regularization_type)
+                    
+                    self.Q_inverse_computed = True
+                    self.Q_inverse_r = Q_inverse_r
+                        
+                else:
+                    Q_inverse_r = self.Q_inverse_r
+            else:
+                raise ValueError("""Inverse of Q can not be computed, because Q has not been computed.
+                                     This requires some programming""")
+
+            return Q_inverse_r
         
         
         def return_last(self):
@@ -2561,16 +2592,36 @@ class ContDescrStateSpace(DescreteStateSpace):
 
             return square_root
         
-        def Q_inverse(self, k, jitter=0.0):
+        def Q_inverse(self, k, p_largest_cond_num, p_regularization_type):
             """
-            Inverse of the Q matrix
-            Jitter is addad to the diagonal of S matrix
+            Function inverts Q matrix and regularizes the inverse.
+            Regularization is useful when original matrix is badly conditioned.
+            Function is currently used only in SparseGP code.
+            
+            Inputs:
+            ------------------------------
+            k: int
+            Iteration number.
+            
+            p_largest_cond_num: float
+            Largest condition value for the inverted matrix. If cond. number is smaller than that
+            no regularization happen.
+            
+            regularization_type: 1 or 2
+            Regularization type.
+            
+            regularization_type: int (1 or 2)
+            
+                type 1: 1/(S[k] + regularizer) regularizer is computed
+                type 2: S[k]/(S^2[k] + regularizer) regularizer is computed
             """
+            #import pdb; pdb.set_trace()
             
             matrix_index = self.reconstruct_indices[k]
             if matrix_index in self.Q_inverse_dict:
-                Q_inverse = self.Q_inverse_dict[matrix_index]
+                Q_inverse_r = self.Q_inverse_dict[matrix_index]
             else:
+                
                 if matrix_index in self.Q_svd_dict:
                     (U, S, Vh) = self.Q_svd_dict[matrix_index]
                 else:
@@ -2579,13 +2630,10 @@ class ContDescrStateSpace(DescreteStateSpace):
                                         overwrite_a=False, check_finite=False)
                     self.Q_svd_dict[matrix_index] = (U,S,Vh)
                 
-                regularizer = S[0]*jitter if S[0] > jitter else jitter
-                Q_inverse = np.dot( U * ( 1.0/(S + regularizer)) , U.T ) # Assume Q_inv is positive definite
-                #Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
-                Q_inverse = 0.5*(Q_inverse + Q_inverse.T)
-                self.Q_inverse_dict[matrix_index] = Q_inverse
+                Q_inverse_r = psd_matrix_inverse(k, 0.5*(self.Qs[:,:, matrix_index] + self.Qs[:,:, matrix_index].T), U,S, p_largest_cond_num, p_regularization_type)
+                self.Q_inverse_dict[matrix_index] = Q_inverse_r
 
-            return Q_inverse
+            return Q_inverse_r
             
         
         def return_last(self):
@@ -3347,8 +3395,8 @@ class ContDescrStateSpace(DescreteStateSpace):
                     # The discrete-time dynamical model*
                     if p==0:
                         A  = AA[:n,:n,p]
-                        Q_noise_2  = P_inf - A.dot(P_inf).dot(A.T)
-                        Q_noise = Q_noise_2
+                        Q_noise_3  = P_inf - A.dot(P_inf).dot(A.T)
+                        Q_noise = Q_noise_3
                         #PP = A.dot(P).dot(A.T) + Q_noise_2
 
                     # The derivatives of A and Q
@@ -3365,6 +3413,9 @@ class ContDescrStateSpace(DescreteStateSpace):
             #Q_noise = Q_noise_1
 
             # Return
+            #import pdb; pdb.set_trace()
+            #if dt != 0:
+            #    Q_noise = Q_noise + np.eye(Q_noise.shape[0])*1e-8
             return A, Q_noise,None, dA, dQ
 
         else: # iterable, array
@@ -3568,4 +3619,120 @@ def balance_ss_model(F,L,Qc,H,Pinf,P0,dF=None,dQc=None,dPinf=None,dP0=None):
 
     # (F,L,Qc,H,Pinf,P0,dF,dQc,dPinf,dP0)
 
-    return bF, bL, bQc, bH, bPinf, bP0, bdF, bdQc, bdPinf, bdP0, T
+    return bF, bL, bQc, bH, bPinf, bP0, bdF, bdQc, bdPinf, bdP0
+
+def psd_matrix_inverse(k,Q, U=None,S=None, p_largest_cond_num=None, regularization_type=2):
+    """
+    Function inverts positive definite matrix and regularizes the inverse.
+    Regularization is useful when original matrix is badly conditioned.
+    Function is currently used only in SparseGP code.
+    
+    Inputs:
+    ------------------------------
+    k: int
+    Iteration umber. Used for information only. Value -1 corresponds to P_inf_inv.
+    
+    Q: matrix
+    To be inverted
+    
+    U,S: matrix. vector
+    SVD components of Q
+    
+    p_largest_cond_num: float
+    Largest condition value for the inverted matrix. If cond. number is smaller than that
+    no regularization happen.
+    
+    regularization_type: 1 or 2
+    Regularization type.
+    """
+    #import pdb; pdb.set_trace()
+#    if (k == 0) or (k == -1): # -1 - P_inf_inv computation
+#        import pdb; pdb.set_trace()
+    
+    if p_largest_cond_num  is None:
+        raise ValueError("psd_matrix_inverse: None p_largest_cond_num")
+        
+    if U is None or S is None:
+        (U, S, Vh) = sp.linalg.svd( Q, full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+    if S[0] < (1e-4):
+        #import pdb; pdb.set_trace()
+        warnings.warn("""state_space_main psd_matrix_inverse: largest singular value is too small {0:e}.
+            condition number is {1:e} Maybe somethigng is wrong
+            """.format(S[0], S[0]/S[-1]))
+        S = S + (1e-4 - S[0]) # make the S[0] at least 1e-4
+        
+    current_conditional_number = S[0]/S[-1]
+    if (current_conditional_number > p_largest_cond_num):
+        if (regularization_type == 1):
+            regularizer = S[0] / p_largest_cond_num
+            # the second computation of SVD is done to compute more precisely singular
+            # vectors of small singular values, since small singular values become large.
+            # It is not very clear how this step is useful but test is here.
+            (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
+                                        full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+            
+            Q_inverse_r = np.dot( U * 1.0/S , U.T ) # Assume Q_inv is positive definite    
+            
+            # In this case, RBF kernel we get complx eigenvalues. Probably
+            # for small eigenvalue corresponding eigenvectors are not very orthogonal.
+            ##########Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
+        elif (regularization_type == 2):
+            # C = max( C_old/(2 * lamda) + lamda/C_old,  lamda/2 + 1/(2*lamda) ) # first terms are dominating in both parts of max                        
+            lamda_star = np.sqrt(current_conditional_number)
+            if 2*p_largest_cond_num >= lamda_star:
+                lamda = current_conditional_number / 2 / p_largest_cond_num
+                
+                regularizer = (S[-1] * lamda)**2
+                
+                Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite
+            else:
+                better_curr_cond_num = (2*p_largest_cond_num)**2 / 2 # division by 2 just in case here
+                warnings.warn("""state_space_main psd_matrix_inverse: reg_type = 2 can't be done completely.
+                    Current conditionakl number {0:e} is reduced to {1:e} by reg_type = 1""".format(current_conditional_number, better_curr_cond_num))
+                
+                regularizer = S[0] / better_curr_cond_num
+                # the second computation of SVD is done to compute more precisely singular
+                # vectors of small singular values, since small singular values become large.
+                # It is not very clear how this step is useful but test is here.
+                (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
+                                            full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                
+                lamda = better_curr_cond_num / 2 / p_largest_cond_num
+                
+                regularizer = (S[-1] * lamda)**2
+                
+                Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite
+            
+            assert lamda > 10, "Some assumptions are incorrect if this is not satisfied."
+            ######Q_inverse = np.dot( Vh.T * ( S/(S**2 + regularizer)) , U.T )
+        else:
+            raise ValueError("AQcompute_batch_Python:Q_inverse: Invalid regularization type")
+    
+    else:
+        Q_inverse_r = np.dot( U * 1.0/S , U.T ) # Assume Q_inv is positive definite
+    # When checking conditional number 2 times difference is ok.
+    Q_inverse_r = 0.5*(Q_inverse_r + Q_inverse_r.T)
+
+
+
+
+#    # Old version when we assign jitter rather then maximal conditional number.
+#    # Regularization_type: int (1 or 2)
+#    #            type 1: 1/(S[k] + S[0]*jitter)
+#    #            type 2: S[k]/(S^2[k] + S[0]*jitter) 
+#    jitter = p_largest_cond_num
+#    regularizer = S[0]*jitter if S[0] > jitter else jitter
+#    if (regularization_type == 1):
+#        Q_inverse_r = np.dot( U * ( 1.0/(S + regularizer)) , U.T ) # Assume Q_inv is positive definite    
+#        
+#        # In this case, RBF kernel we get complx eigenvalues. Probably
+#        # for small eigenvalue corresponding eigenvectors are not very orthogonal.
+#        #Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
+#    elif (regularization_type == 2):
+#        Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite  
+#        #Q_inverse = np.dot( Vh.T * ( S/(S**2 + regularizer)) , U.T )
+#    else:
+#        raise ValueError("AQcompute_batch_Python:Q_inverse: Invalid regularization type")
+#    Q_inverse_r = 0.5*(Q_inverse_r + Q_inverse_r.T)
+
+    return Q_inverse_r
