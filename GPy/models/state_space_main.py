@@ -3291,7 +3291,10 @@ class ContDescrStateSpace(DescreteStateSpace):
 
             x_{k} =  A_{k} * x_{k-1} + q_{k-1};       q_{k-1} ~ N(0, Q_{k-1})
 
-
+        TODO: this function can be redone to "preprocess dataset", when
+        close time points are handeled properly (with rounding parameter) and
+        values are averaged accordingly.
+        
         Input:
         --------------
         F,L: LTI SDE matrices of corresponding dimensions

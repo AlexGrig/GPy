@@ -246,9 +246,9 @@ class sparse_inference(object):
         """
         Function returns all the necessary matrices for the SpInGP inference.        
         
-         Notation for matrix is: K = A0, B1 0       
-                                    C1, A1, B2
-                                    0 , C2, A2s
+         Notation for matrix is: K^{-1} = A^{-T} Q^{-1} A^{-1} = [ A0, B1, 0       
+                                                                   C1, A1, B2
+                                                                   0 , C2, A2 ]
                                     
         Input:
         ------------------------------
@@ -263,19 +263,27 @@ class sparse_inference(object):
         Output:
         -------------------------------
         
-        Ait, 
-        Qi, 
-        GtY, 
-        G, 
-        GtG, 
-        HtH, 
+        Ait: sparse(Ai_size, Ai_size)
+            A^{-T} matrix
+        Qi: sparse(Ai_size, Ai_size)
+            Q^{-1} matrix
+            
+        GtY: help matrix 1 
+        G: help matrix 2 
+        GtG: help matrix 3
+        HtH: help matrix 4
+        
         Ki_derivatives,
         
         Kip: sparse(Ai_size, Ai_size)
-            Block diagonal matrix. The diagonal blocks are the same as in K.
-            Required for ll dorivarive computation.
+            Block tridiagonal matrix. The tridiagonal blocks are the same as in K (inverse of Ki)
+            Required for ll derivarive computation.
+            TODO: note, because it is computed reqursively there may be a loss of accuracy!
             
-        matrix_blocks, 
+        matrix_blocks: dictionary
+            Contains 2 keys: 'Akd' and 'Ckd'. Another form of writing matrix K^{-1} = Ki.
+            Look their derivatives for shapes.
+            
         matrix_blocks_derivatives: dictionary
             Dictionary contains 2 keys: 'dAkd' and 'dCkd'. Each contain corresponding
                 derivatives of matrices Ak and Ck. Shapes dAkd[0:(N-1)] [0:(deriv_num-1),0:(block_size-1), 0:(block_size-1)]
@@ -373,7 +381,7 @@ class sparse_inference(object):
             Qk = AQcomp.Qk(k)
             Qk = 0.5*(Qk + Qk.T) # symmetrize because if Qk is not full rank it becomes not symmetric due to numerical problems
             #import pdb; pdb.set_trace()
-            Qk_inv = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type)
+            Qk_inv = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type) # in AQcomp numbering starts from 0, consequence of Python indexing.
             if np.any((np.abs(Qk_inv - Qk_inv.T)) > 0):
                 raise ValueError('sparse_inverse_cov: Qk_inv is not symmetric!')
             
@@ -396,7 +404,6 @@ class sparse_inference(object):
                     prev_Ak = Ak # Ak from the previous step
                     prev_diag = P_inf
                     prev_off_diag = np.dot(Ak, P_inf) # previous off diagonal (lowe part)                    
-                    
                     
                     Kip[col_ind_start:col_ind_end, col_ind_start:col_ind_end] = prev_diag
                     Kip[row_ind_start:row_ind_end, col_ind_start:col_ind_end] = prev_off_diag
@@ -505,9 +512,10 @@ class sparse_inference(object):
             tridiagon precision. This is needed for further variance calculation.
             For marginal likelihood and its gradient it is not required.
         
-        Kip: sparce
-            Block diagonal matrix. The diagonal blocks are the same as in K.
+        Kip: sparse(Ai_size, Ai_size)
+            Block tridiagonal matrix. The tridiagonal blocks are the same as in K (inverse of Ki)
             Required for ll derivarive computation.
+            TODO: note, because it is computed reqursively there may be a loss of accuracy!
         """
         measure_timings = True        
         
