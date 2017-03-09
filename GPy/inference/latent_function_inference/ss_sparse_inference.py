@@ -4,6 +4,7 @@
 from .posterior import PosteriorExact as Posterior
 from ...models import state_space_main as ssm
 from ... import likelihoods
+import warnings
 
 from scipy import sparse
 import scipy.linalg as la
@@ -11,6 +12,7 @@ import sksparse.cholmod as cholmod
 
 import time
 import numpy as np
+import scipy as sp
 from . import LatentFunctionInference
 log_2_pi = np.log(2*np.pi)
 
@@ -727,7 +729,7 @@ class sparse_inference(object):
 #                                 matrix_blocks, None, matrix_blocks_derivatives, None,
 #                                 compute_inv_diag=False, add_noise_deriv=True)
 # Use function deriv_determinant2 <-                                 
-                                 
+            import pdb; pdb.set_trace()                     
             d_marginal_ll += -0.5* d_determ[:,np.newaxis]
             
             if measure_timings: meas_times[9].append(time.time() - t2)
@@ -1415,16 +1417,1140 @@ class sparse_inference(object):
             
         return result_diag
     
-    @staticmethod 
-    def covariances():
+class btd_inference(object):
+    
+
+    class AQcompute_batch_Python(object):
         """
-        This function computes variances of data.
+        Class for calculating matrices A, Q, dA, dQ of the discrete Kalman Filter
+        from the matrices F, L, Qc, P_ing, dF, dQc, dP_inf of the continuos state
+        equation. dt - time steps.
+
+
+        It computes matrices for all time steps. This object is used when
+        there are not so many (controlled by internal variable)
+        different time steps and storing all the matrices do not take too much memory.
+        """
+        def __init__(self, F,L,Qc,dt,compute_derivatives=False, grad_params_no=None, P_inf=None, dP_inf=None, dF = None, dQc=None):
+            """
+            Constructor. All necessary parameters are passed here and stored
+            in the opject.
+
+            Input:
+            -------------------
+                F, L, Qc, P_inf : matrices
+                    Parameters of corresponding continuous state model
+                dt: array
+                    All time steps
+                compute_derivatives: bool
+                    Whether to calculate derivatives
+
+                dP_inf, dF, dQc: 3D array
+                    Derivatives if they are required
+
+            Output:
+            -------------------
+            Nothing
+            """
+            As, Qs, reconstruct_indices, dAs, dQs = ssm.ContDescrStateSpace.lti_sde_to_descrete(F,
+                        L,Qc,dt,compute_derivatives,
+                        grad_params_no=grad_params_no, P_inf=P_inf, dP_inf=dP_inf, dF=dF, dQc=dQc)
+
+            self.As = As
+            self.Qs = Qs
+            self.dAs = dAs
+            self.dQs = dQs
+            self.reconstruct_indices = reconstruct_indices
+            self.total_size_of_data = self.As.nbytes + self.Qs.nbytes +\
+                            (self.dAs.nbytes if (self.dAs is not None) else 0) +\
+                            (self.dQs.nbytes if (self.dQs is not None) else 0) +\
+                            (self.reconstruct_indices.nbytes if (self.reconstruct_indices is not None) else 0)
+
+            self.Q_svd_dict = {}
+            self.Q_inverse_dict = {}
+            
+            self.last_k = None
+             # !!!Print statistics! Which object is created
+            # !!!Print statistics! Print sizes of matrices
+
+        def Ak(self,k,m,P):
+            self.last_k = k
+            return self.As[:,:, self.reconstruct_indices[k]]
+
+        def Qk(self,k):
+            self.last_k = k
+            return self.Qs[:,:, self.reconstruct_indices[k]]
+
+        def dAk(self,k):
+            self.last_k = k
+            return self.dAs[:,:, :, self.reconstruct_indices[k]]
+
+        def dQk(self,k):
+            self.last_k = k
+            return self.dQs[:,:, :, self.reconstruct_indices[k]]
+
+        def Q_inverse(self, k, p_largest_cond_num, p_regularization_type):
+            """
+            Function inverts Q matrix and regularizes the inverse.
+            Regularization is useful when original matrix is badly conditioned.
+            Function is currently used only in SparseGP code.
+            
+            Inputs:
+            ------------------------------
+            k: int
+            Iteration number.
+            
+            p_largest_cond_num: float
+            Largest condition value for the inverted matrix. If cond. number is smaller than that
+            no regularization happen.
+            
+            regularization_type: 1 or 2
+            Regularization type.
+            
+            regularization_type: int (1 or 2)
+            
+                type 1: 1/(S[k] + regularizer) regularizer is computed
+                type 2: S[k]/(S^2[k] + regularizer) regularizer is computed
+            """
+            #import pdb; pdb.set_trace()
+            
+            matrix_index = self.reconstruct_indices[k]
+            if matrix_index in self.Q_inverse_dict:
+                new_S = None
+                Q_inverse_r = self.Q_inverse_dict[matrix_index]
+            else:
+                
+                if matrix_index in self.Q_svd_dict:
+                    (U, S, Vh) = self.Q_svd_dict[matrix_index]
+                else:
+                    (U, S, Vh) = sp.linalg.svd( self.Qs[:,:, matrix_index],
+                                        full_matrices=False, compute_uv=True,
+                                        overwrite_a=False, check_finite=False)
+                    self.Q_svd_dict[matrix_index] = (U,S,Vh)
+                
+                Q_inverse_r, new_S = btd_inference.psd_matrix_inverse(k, 0.5*(self.Qs[:,:, matrix_index] + self.Qs[:,:, matrix_index].T), U,S, p_largest_cond_num, p_regularization_type)
+                self.Q_inverse_dict[matrix_index] = Q_inverse_r
+
+            return Q_inverse_r, new_S
+            
+    @staticmethod
+    def psd_matrix_inverse(k,Q, U=None,S=None, p_largest_cond_num=None, regularization_type=2):
+        """
+        Function inverts positive definite matrix and regularizes the inverse.
+        Regularization is useful when original matrix is badly conditioned.
+        Function is currently used only in SparseGP code.
+        
+        Inputs:
+        ------------------------------
+        k: int
+        Iteration umber. Used for information only. Value -1 corresponds to P_inf_inv.
+        
+        Q: matrix
+        To be inverted
+        
+        U,S: matrix. vector
+        SVD components of Q
+        
+        p_largest_cond_num: float
+        Largest condition value for the inverted matrix. If cond. number is smaller than that
+        no regularization happen.
+        
+        regularization_type: 1 or 2 or 3
+        Regularization type.
+        """
+        #import pdb; pdb.set_trace()
+    #    if (k == 0) or (k == -1): # -1 - P_inf_inv computation
+    #        import pdb; pdb.set_trace()
+        
+        if p_largest_cond_num  is None:
+            raise ValueError("psd_matrix_inverse: None p_largest_cond_num")
+            
+        if U is None or S is None:
+            (U, S, Vh) = sp.linalg.svd( Q, full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+        if S[0] < (1e-4):
+            #import pdb; pdb.set_trace()
+            warnings.warn("""state_space_main psd_matrix_inverse: largest singular value is too small {0:e}.
+                condition number is {1:e} Maybe somethigng is wrong
+                """.format(S[0], S[0]/S[-1]))
+            #S = S + (1e-4 - S[0]) # make the S[0] at least 1e-4
+            
+        current_conditional_number = S[0]/S[-1]
+        if (current_conditional_number > p_largest_cond_num):
+            if (regularization_type == 1):
+                regularizer = S[0] / p_largest_cond_num
+                # the second computation of SVD is done to compute more precisely singular
+                # vectors of small singular values, since small singular values become large.
+                # It is not very clear how this step is useful but test is here.
+                (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
+                                            full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                
+                new_S = 1.0/S
+                Q_inverse_r = np.dot( U * new_S , U.T ) # Assume Q_inv is positive definite    
+                
+                # In this case, RBF kernel we get complx eigenvalues. Probably
+                # for small eigenvalue corresponding eigenvectors are not very orthogonal.
+                ##########Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
+            elif (regularization_type == 2):
+                # C = max( C_old/(2 * lamda) + lamda/C_old,  lamda/2 + 1/(2*lamda) ) # first terms are dominating in both parts of max                        
+                lamda_star = np.sqrt(current_conditional_number)
+                if 2*p_largest_cond_num >= lamda_star:
+                    lamda = current_conditional_number / 2 / p_largest_cond_num
+                    
+                    regularizer = (S[-1] * lamda)**2
+                    
+                    new_S = S/(S**2 + regularizer)
+                    Q_inverse_r = np.dot( U * (new_S) , U.T ) # Assume Q_inv is positive definite
+                else:
+                    better_curr_cond_num = (2*p_largest_cond_num)**2 / 2 # division by 2 just in case here
+                    warnings.warn("""state_space_main psd_matrix_inverse: reg_type = 2 can't be done completely.
+                        Current conditionakl number {0:e} is reduced to {1:e} by reg_type = 1""".format(current_conditional_number, better_curr_cond_num))
+                    
+                    regularizer = S[0] / better_curr_cond_num
+                    # the second computation of SVD is done to compute more precisely singular
+                    # vectors of small singular values, since small singular values become large.
+                    # It is not very clear how this step is useful but test is here.
+                    (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
+                                                full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                    
+                    lamda = better_curr_cond_num / 2 / p_largest_cond_num
+                    
+                    regularizer = (S[-1] * lamda)**2
+                    
+                    new_S = S/(S**2 + regularizer)
+                    Q_inverse_r = np.dot( U * (new_S) , U.T ) # Assume Q_inv is positive definite
+                
+                assert lamda > 10, "Some assumptions are incorrect if this is not satisfied."
+                ######Q_inverse = np.dot( Vh.T * ( S/(S**2 + regularizer)) , U.T )
+                
+            elif (regularization_type == 3): # NUllify the inverse of very small singular values
+                cutoff = S[0] / p_largest_cond_num                
+                
+                new_S = 1/S
+                new_S[ S < cutoff ] = 0.0
+                
+                Q_inverse_r = np.dot( U * (new_S) , U.T )
+                
+            else:
+                raise ValueError("AQcompute_batch_Python:Q_inverse: Invalid regularization type")
+        
+        else:
+            new_S = 1.0/S
+            Q_inverse_r = np.dot( U * 1.0/S , U.T ) # Assume Q_inv is positive definite
+        # When checking conditional number 2 times difference is ok.
+        Q_inverse_r = 0.5*(Q_inverse_r + Q_inverse_r.T)
+
+        return Q_inverse_r, new_S
+    
+    @staticmethod 
+    def block_tridiag_solver(N,K, A_matr, C_matr, rhs_D_matr, rhs_diag=False, inversion_comp=None, rhs_C_matr=None,
+                             comp_matrix_determinant=False, comp_solution=False, comp_solution_trace=False,
+                             rhs_block_num=None, rhs_block_width = None, front_multiplier=None):
+        """
+        This function solves all required block-tridiagonal subproblem.
+        Now the problem is assumed to be symmetrix, hence only one
+        SUBdiagnal (Cd)s are given
         
         Input:
         -----------------------
+        N: int
+            Number of data points
+        K: int
+            Block size
         
+        A_matr: matrix [N*K, K]
+            Block row matrix representing the main diagonal.        
         
+        C_matr: matrix [(N-1)*K, K]
+            Block row matrix representing subdiagonal.
+            
+        rhs_D_matr: matrix [N*K, rhs_block_num*rhs_block_width]            
+            Right-hand-side or diagonal blocks of the RHS.
+            
+        rhs_diag: bool
+            If False - rhs represent a vector (matrix) RHS, if true
+            it represent a block-diagoanal of the inverse
+            
+        inversion_comp: dictionary or None
+            If the same matrix (which is inverted) were procesed already then
+            this dictionary can be use the second time. This is possible only
+            for BTD_rhs. 
+            
+        rhs_C_matr: matrix [(N-1)*K, rhs_block_num*rhs_block_width]
+            Subdiagonal of rhs.
+            
+        comp_matrix_determinant: bool
+            Whether to compute original matrix determinant
+        
+        comp_solution: bool
+            Whether to compute solution
+            
+        comp_solution_trace: bool 
+            Only trace of the diagonal solution is required
+            
+        rhs_block_num: int
+            It says how many BTD systems we are solving sumiltaneously.
+            If more then one then the blocks in rhs_D_matr and rhs_C_matr 
+            are of size [K, rhs_block_num*K]
+            
+        rhs_block_width: int
+            For the case with multiple RHS says what is the width of each block
+    
+        front_multiplier: matrix[any, K]
+            When the BTD matrix is inverted, the might be constant front multiplier which
+            multiplies each part of the solution.
+            
+        Output:
+        -----------------------
+        r1:
+            abs( LogDet[A] )
+            
+        r2: array
+            Solution. For regular system just solution. For BTD the diagonal
+            of the solution.
+            
+        r3: float
+            For BTD system computes Trace[Solution]
+            
+        comp_inv: dict
+            values obtained on the first (down iteration) which can be reused for
+            different right hand sides (only for BTD rhs).
         """
 
-
+        Ak = lambda i: A_matr[i*K:(i+1)*K, 0:K] # Dd_matr indexing from 0 to N-1
+        Ck = lambda i: C_matr[i*K:(i+1)*K, 0:K] # Cd_matr indexing from 0 to N-2
         
+        rhs_Dk = lambda i: rhs_D_matr[i*K:(i+1)*K, :] # Dd_matr indexing from 0 to N-1
+        if rhs_C_matr is not None:
+            rhs_Ck = lambda i: rhs_C_matr[i*K:(i+1)*K, :] # Cd_matr indexing from 0 to N-2
+        
+#        rhs_D = lambda i: rhs_D_matr[i*K:(i+1)*K, :]
+#        if rhs_C_matr is not None:
+#            rhs_C = lambda i: rhs_C_matr[i*K:(i+1)*K, :]
+        
+        if inversion_comp is None:
+            inversion_comp={}; inversion_comp['forward_LU'] = {}; inversion_comp['forward_piv'] = {}
+            inversion_comp['U'] = {}
+            forward_comp = True
+        else:
+            forward_comp = False
+        
+        if forward_comp == False:
+            assert comp_matrix_determinant == False, "Precomputed inversion and determinant coputations are incompatible"
+            assert rhs_diag == True, "Precomputed inversion and not BTD_rhs are incompatible"
+            
+        if comp_matrix_determinant:
+            logdetA = np.empty((N,))
+            
+        if comp_solution or comp_solution_trace:
+            if not rhs_diag:
+                solution = rhs_D_matr.copy() # Here the modification of rhs or rhs_diag is stored along the computations
+            else:
+                solution = np.empty( rhs_D_matr.shape )
+            
+            if rhs_C_matr is not None:
+                rhs_diag_sub = True
+            else:
+                rhs_diag_sub = False
+        
+        if rhs_diag:
+            if rhs_block_num is None:
+                rhs_block_num = 1 # solving multiple RHS systems simultaneously.
+            
+            if rhs_block_num == 1:
+                if rhs_block_width is None:
+                    rhs_block_width = K
+                    
+            if rhs_C_matr is not None:
+                assert (rhs_D_matr.shape[1] == rhs_block_width*rhs_block_num), "rhs_block_num is wrong 1"
+                assert (K == rhs_block_width), "RHS non-square blocks suported only when rhs_C_matr is zero (no sub diagonals)"
+                assert (rhs_C_matr.shape[1] == rhs_block_width*rhs_block_num), "rhs_block_num is wrong 2"
+            
+        if comp_solution_trace:
+            assert rhs_diag, "Solution trace is aplicable only for BTD inversion."
+            assert front_multiplier is None, "Solution trace and Front Multiplier are incompatible."
+            assert rhs_block_width == K, "Trace is computable ony for square blocks in RHS."
+            
+            solution_trace = np.empty( (N, rhs_block_num) )
+        
+        use_front_multiplier = False
+        if front_multiplier is not None:
+            assert rhs_diag, "Front Multiplier is aplicable only for BTD inversion."
+            front_mult_solution = np.empty( (front_multiplier.shape[0]*N, rhs_D_matr.shape[1]) )
+            
+            use_front_multiplier = True
+        # In our notation the matrix consist of lower diagonal: C1, C1,...
+        # main diagonal: A0, A1, A2..., and upper diagonal: B1, B2,...        
+        # In this case the matrix is symetric.
+            
+        #test_inv = np.zeros((N*K, N*K))
+        
+        #import pdb; pdb.set_trace()
+        # Forward pass: compute logdetA, inversion_comp, solution for regular inversion.
+        # If we do BTD_rhs inversion this step can be skiped if it is done before.
+        if forward_comp:
+            prev_Lambda = Ak(0);
+            for i in range(0, N): # first point was for initialization
+            
+                (LU, piv) = la.lu_factor(prev_Lambda)
+    
+                inversion_comp['forward_LU'][i] = LU 
+                inversion_comp['forward_piv'][i] = piv
+                # Actually this is neded for rhs_diag diag computations only:             
+                inversion_comp['U'][i] = la.lu_solve((LU, piv),  Ck(i).T )
+                
+                if comp_matrix_determinant:
+                    ddd = np.diag(LU)
+                    logdetA[i] = np.sum( np.log(np.abs(ddd) ) ) # new
+                    
+                if (i==N-1):
+                    break
+                    # Future points are not computed any more
+                
+                if comp_solution or comp_solution_trace:
+                    if not rhs_diag: # regular system
+                        solution[(i+1)*K:(i+2)*K, : ] = solution[(i+1)*K:(i+2)*K, : ] - np.dot( Ck(i), la.lu_solve((LU, piv),  solution[(i+0)*K:(i+1)*K,:] ) )
+                    else: # inverse of BTD matrix
+                        # Nothing to do here, Only inversion_comp['U'][i] is relevant for this problem
+                        pass
+                              
+                Lambda = Ak(i+1) - np.dot(Ck(i), la.lu_solve((LU, piv), Ck(i).T)) # New Lambda
+                prev_Lambda = Lambda # For the next step
+        
+        #import pdb; pdb.set_trace()
+        if comp_solution or comp_solution_trace:
+            # Backward pass
+            #  For BTD solution matrix A is notded here anymore. For regular system Ck is still used.
+            for i in range(N-1, -1,-1): # first point was for initialization
+                LU = inversion_comp['forward_LU'][i] 
+                piv = inversion_comp['forward_piv'][i]
+                
+                # do the backward elimination step
+                tmp_sol = None
+                if i != 0:
+                    if not rhs_diag: # regular system. Correcting the previous step
+                        tmp_sol = la.lu_solve((LU, piv),  solution[(i+0)*K:(i+1)*K, : ] )
+                        solution[(i-1)*K:(i)*K, : ] = solution[(i-1)*K:(i)*K, : ] - np.dot( Ck(i-1).T, tmp_sol )
+                        
+                    else: # inverse of BTD matrix
+                        # Nothing to do here
+                        pass
+                    
+                # computing solution
+                if not rhs_diag: # regular system
+                    if tmp_sol is not None: 
+                        solution[(i+0)*K:(i+1)*K, : ] = tmp_sol
+                    else:
+                        solution[(i+0)*K:(i+1)*K, : ] = la.lu_solve((LU, piv),  solution[(i+0)*K:(i+1)*K, : ] )
+                
+                else: # inverse of BTD matrix
+                    U = inversion_comp['U'][i]
+                    if i == N-1:
+                        #test_inv[ (i+0)*K:(i+1)*K, (i+0)*K:(i+1)*K] =  la.lu_solve((LU, piv),  np.eye(K) )   
+                        solution[(i+0)*K:(i+1)*K, : ] = la.lu_solve((LU, piv), rhs_Dk(i) )
+                        prev_Uup = np.zeros((K,K))
+                    else:
+                        prev_LU = inversion_comp['forward_LU'][i+1] 
+                        prev_piv = inversion_comp['forward_piv'][i+1]
+                        
+                        up = - la.lu_solve((prev_LU, prev_piv),  U.T ).T + np.dot(U, prev_Uup)
+                        #low = -np.dot( test_inv[ (i+1)*K:(i+2)*K, (i+1)*K:(i+2)*K], inversion_comp['U'][i].T)
+                        #up = -np.dot( U, test_inv[ (i+1)*K:(i+2)*K, (i+1)*K:(i+2)*K])
+                        
+                        #test_inv[ (i+0)*K:(i+1)*K, (i+0)*K:(i+1)*K] = la.lu_solve((LU, piv),  np.eye(K) ) - np.dot( U, up.T )
+                        #test_inv[ (i+0)*K:(i+1)*K,  (i+1)*K:(i+2)*K] = up
+                        #test_inv[ (i+1)*K:(i+2)*K,  (i+0)*K:(i+1)*K] = up.T
+                        if rhs_diag_sub:
+                            solution[(i+1)*K:(i+2)*K, : ] += np.dot(up.T, btd_inference.transpose_submatrices(rhs_Ck(i),rhs_block_num,rhs_block_width))
+                            solution[(i+0)*K:(i+1)*K, : ] = la.lu_solve((LU, piv),  rhs_Dk(i) ) - np.dot( np.dot( up, U.T ), rhs_Dk(i) ) + np.dot(up, rhs_Ck(i))
+                        else:
+                            solution[(i+0)*K:(i+1)*K, : ] = la.lu_solve((LU, piv),  rhs_Dk(i) ) - np.dot( np.dot( up, U.T ), rhs_Dk(i) )
+                            
+                        prev_Uup = np.dot(U, up.T)
+                
+                # solution with front multiplier
+                if use_front_multiplier and (i != N-1): # compute front multiplier solution for the solution from previous iteration
+                    front_mult_solution[(i+1)*front_multiplier.shape[0]:(i+2)*front_multiplier.shape[0],:] = np.dot(front_multiplier, solution[(i+1)*K:(i+2)*K, : ] )
+                
+                # solution trace                    
+                if comp_solution_trace and (i != N-1): # compute trace for the solution from previous iteration
+                    tr_tmp = solution[(i+1)*K:(i+2)*K, : ].reshape(K,rhs_block_num,K).swapaxes(1,0)  
+                    solution_trace[i+1,:] = tr_tmp.trace(axis1=1,axis2=2)
+        
+        # compute lacking trace computation from the last step
+        if comp_solution_trace:
+            tr_tmp = solution[(0)*K:(1)*K, : ].reshape(K,rhs_block_num,K).swapaxes(1,0)  
+            solution_trace[0,:] = tr_tmp.trace(axis1=1,axis2=2)
+            
+        # compute lacking front multiplier solution computation from the last step
+        if use_front_multiplier: # compute front multiplier solution for the solution from previous iteration
+            front_mult_solution[(0)*front_multiplier.shape[0]:(1)*front_multiplier.shape[0],:] = np.dot(front_multiplier, solution[(0)*K:(1)*K, : ] )
+        
+        # logdet, solution, trace, inversion_comp
+        #import pdb; pdb.set_trace()
+        
+        if comp_matrix_determinant:
+            r1 = logdetA.sum() if comp_matrix_determinant else None
+        else:
+            r1= None
+        
+        if comp_solution:
+            if use_front_multiplier:
+                r2 = front_mult_solution
+            else:
+                r2 = solution
+        else:
+            r2 = None
+        
+        r3 = solution_trace.sum(axis=0) if comp_solution_trace else None
+        
+        return r1,r2,r3,inversion_comp
+    
+    @staticmethod
+    def transpose_submatrices(M, submatrix_number, S, row=True):
+        """
+        if row== True, in a matrix of shape (K, K*submatrix_number) (which is stack of submatrix_number matrics)
+        transpose every submatrix. 
+        
+        If row = False, is a matrix shape (K*submatrix_number, K) transpose every submatrix.
+        
+        Input:
+        ------------------
+        
+        M: array
+            Matrix
+        
+        submatrix_number: int
+            Number of submatrices of width S in M.
+            
+        S: int
+            Block width in the stacked submatrices.
+        
+        row: bool
+            If true it is assumed that submatrices are stacked row-wise.
+            If false it is assumed that they are stacked columnwise.
+        """
+        
+        #import pdb; pdb.set_trace()
+        
+        if submatrix_number > 1:
+            R = M.copy()
+            
+            if row == True: # matrices stacked row wise ( the shape is (K, S*submatrix_number) )
+                K = M.shape[0] # block size
+                R = R.reshape(K,submatrix_number,S).transpose( (2,1,0 ) ).reshape( (S,submatrix_number*K) )
+            else: # matrices stacked row wise ( the shape is (S*submatrix_number, K) )
+                K = M.shape[1] # block size
+                R = np.rollaxis(R.reshape((submatrix_number,S,K)), 2,1 ).reshape((submatrix_number*K,S))
+        elif submatrix_number == 1:
+            R = M.copy().T
+        else:
+            raise ValueError("transpose_submatrices: Wrong submatrix number") 
+            
+        return R
+        
+    @staticmethod 
+    def btd_times_vector(matr_D, vect, matr_low_D=None, grad_params_no=None, Kv=None):
+        """
+        Function computes the product of SYMMETRIC btd matrix and a vector.
+        BTD matrix is passed as matr_D and matr_low_D       
+        
+        Actually symmetricity only wrt block lower diagonals. The diagonal blocks
+        may not be symmetric. If there are no matr_low_D, the matrix may be non-symmetric         
+        
+        Input:
+        --------------------
+        
+        matr_D: matrix[N*Kv, K*grad_params_no]
+            Block diagonal
+            
+        matr_low_D: matrix[(N-1)*Kv, K*grad_params_no]
+            Lower diagonal            
+            
+        vect: matrix[N*K,grad_params_no]
+        
+        grad_params_no: int
+            Number of derivative blocks.
+        
+        Kv: int
+            Vertical block size. It might be different from block size K when
+            there are no matr_low_D.
+        """
+        #import pdb; pdb.set_trace()
+        
+        if grad_params_no is None:
+            grad_params_no = 1
+
+        K =  int(matr_D.shape[1] / grad_params_no) # the width of the matrix block
+        if Kv is None:
+            Kv = K # the vertical block size. 
+        else:
+            if Kv != K:
+                assert matr_low_D is None, "Vertical block size different from the regular block size onlu when low diagonal is None."
+                
+        N = int( matr_D.shape[0]/Kv)        
+            
+        vect = vect.reshape((N,K)).repeat(Kv,axis=0)
+        
+        res = np.empty( (N*Kv, grad_params_no) )        
+        
+        for i in range(0,grad_params_no):
+            
+            res[:,i] = np.sum( matr_D[:, i*K:(i+1)*K]*vect , axis=1) # diagonal part
+            
+            if matr_low_D is not None:
+                res[K:,i] += np.sum(matr_low_D[:, i*K:(i+1)*K]*vect[0:-K, :], axis=1)
+                res[0:-K,i] += np.sum( btd_inference.transpose_submatrices(matr_low_D[:, i*K:(i+1)*K], N-1, K, row=False)*vect[K:,:], axis=1 )
+                
+        return res
+        
+    @staticmethod
+    #@profile
+    def test_build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type=2, 
+                       compute_derivatives=False, dP_inf=None, dF=None, dQc=None):    
+        """
+        Test the build_matrices function. This function does the same coputations as build_matrices
+        but in a sparse matrix form which is much more transparent.
+        Result should coincide.         
+        """
+        #import pdb; pdb.set_trace() 
+        block_size = F.shape[0]
+        x_points_num = X.shape[0]
+        grad_params_no = dF.shape[2]
+        if not isinstance(p_largest_cond_num, float):
+            raise ValueError('sparse_inference.sparse_inverse_cov: p_Inv_jitter is not float!')
+            
+        dt = np.diff(X,axis=0)
+        if np.any(dt < 1e-3):
+            raise ValueError("btd_inference.build_matrices: small dt explore!")
+            
+        Ai_size = x_points_num * block_size
+        Ait = np.zeros( (Ai_size, Ai_size))
+        Qi = np.zeros( (Ai_size, Ai_size) )
+        
+        Ait_derivatives = np.zeros( (grad_params_no, Ai_size, Ai_size) )
+        Qi_derivatives = np.zeros( (grad_params_no, Ai_size, Ai_size) )
+                #(self, F,L,Qc,dt,compute_derivatives=False, grad_params_no=None, P_inf=None, dP_inf=None, dF = None, dQc=None)
+        AQcomp = btd_inference.AQcompute_batch_Python(F,L,Qc,dt, compute_derivatives, grad_params_no, P_inf, dP_inf, dF, dQc)
+        
+        b_ones = np.eye(block_size)
+        
+        # Fill matrices ->
+        #import pdb; pdb.set_trace()
+        P_inf = 0.5*(P_inf + P_inf.T)
+                
+        (U,S,Vh) = la.svd(P_inf, compute_uv=True,)
+        P_inf_inv, new_S = btd_inference.psd_matrix_inverse(0, P_inf, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
+        # Different inverse computation >-
+        Ait[0:block_size,0:block_size] = b_ones
+        Qi[0:block_size,0:block_size] = P_inf_inv
+        
+        for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
+            Qi_derivatives[dd,0:block_size,0:block_size] = -np.dot(P_inf_inv, np.dot(dP_inf[:,:,dd], P_inf_inv))
+            
+        #import pdb; pdb.set_trace() 
+        for k in range(0,x_points_num-1):
+            Ak = AQcomp.Ak(k,None,None)
+            Qk = AQcomp.Qk(k)
+            Qk = 0.5*(Qk + Qk.T) # symmetrize because if Qk is not full rank it becomes not symmetric due to numerical issues
+            #import pdb; pdb.set_trace()
+            Qk_inv, new_S = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type) # in AQcomp numbering starts from 0, consequence of Python indexing.
+            if np.any((np.abs(Qk_inv - Qk_inv.T)) > 0):
+                raise ValueError('sparse_inverse_cov: Qk_inv is not symmetric!')
+            
+            row_ind_start = (k+1)*block_size
+            row_ind_end = row_ind_start + block_size
+            col_ind_start = k*block_size
+            col_ind_end = col_ind_start + block_size
+            
+            Ait[col_ind_start:col_ind_end, row_ind_start:row_ind_end] = -Ak.T
+            Ait[row_ind_start:row_ind_end, row_ind_start:row_ind_end] = b_ones        
+            Qi[row_ind_start:row_ind_end, row_ind_start:row_ind_end] = Qk_inv
+            
+            dAk = AQcomp.dAk(k)
+            dQk = AQcomp.dQk(k)
+            
+            for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
+                dAk_p = dAk[:,:,dd]
+                dQk_p = dQk[:,:,dd]
+                dQk_p = 0.5*(dQk_p + dQk_p.T)
+     
+                Ait_derivatives[dd, col_ind_start:col_ind_end, row_ind_start:row_ind_end] = -dAk_p.T
+                Qi_derivatives[dd, row_ind_start:row_ind_end, row_ind_start:row_ind_end] = -np.dot( Qk_inv, np.dot( dQk_p, Qk_inv) )
+        # Fill matrices <-
+        
+        #import pdb; pdb.set_trace() 
+        # Perform matrix multiplication ->        
+        Ki = np.dot( Ait, np.dot(Qi, Ait.T) )
+        dKi = np.empty( ((grad_params_no, Ai_size, Ai_size) ) )
+        for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
+            tmp0 = np.dot( Ait_derivatives[dd,:,:], np.dot(Qi, Ait.T ) )
+            dKi[dd,:,:] = tmp0 + tmp0.T + np.dot( Ait, np.dot(Qi_derivatives[dd,:,:] ,Ait.T ) )
+        # Perform matrix multiplication <-
+                
+        # Read off the main block-diagonal and sub-diagonal ->
+        Ki_diag = np.empty( (x_points_num*block_size, block_size) )
+        Ki_low_diag = np.empty( (block_size*(x_points_num-1), block_size) )
+        _, Ki_logdet = np.linalg.slogdet(Ki)
+        
+        d_Ki_diag = np.empty( (block_size*x_points_num, block_size*grad_params_no) )
+        d_Ki_low_diag = np.empty( (block_size*(x_points_num-1), block_size*grad_params_no) )
+        d_Ki_logdet = np.empty((grad_params_no,) )
+        
+        #import pdb; pdb.set_trace()
+        Ki_diag[0:block_size] = Ki[0:block_size, 0:block_size]
+        for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
+            d_Ki_diag[0:block_size,(dd+0)*block_size:(dd+1)*block_size] = dKi[dd,0:block_size,0:block_size]  
+            d_Ki_logdet[dd] = np.trace( np.linalg.lstsq( Ki, dKi[dd,:,:])[0] )
+            
+        for k in range(0,x_points_num-1):
+            Ki_diag[(k+1)*block_size:(k+2)*block_size] = Ki[(k+1)*block_size:(k+2)*block_size, (k+1)*block_size:(k+2)*block_size]
+            Ki_low_diag[(k+0)*block_size:(k+1)*block_size] = Ki[(k+1)*block_size:(k+2)*block_size, (k+0)*block_size:(k+1)*block_size]
+            
+            for dd in range(0,grad_params_no): # ignore derivatives wrt noise variance
+                d_Ki_diag[(k+1)*block_size:(k+2)*block_size,(dd+0)*block_size:(dd+1)*block_size] = \
+                    dKi[dd, (k+1)*block_size:(k+2)*block_size, (k+1)*block_size:(k+2)*block_size]  
+                d_Ki_low_diag[(k+0)*block_size:(k+1)*block_size, (dd+0)*block_size:(dd+1)*block_size] = \
+                    dKi[dd, (k+1)*block_size:(k+2)*block_size, (k+0)*block_size:(k+1)*block_size]
+                
+        # Read off the main block-diagonal and sub-diagonal <-
+        
+        return Ki_diag, Ki_low_diag, Ki_logdet, d_Ki_diag, d_Ki_low_diag, d_Ki_logdet, Ki, dKi
+                
+    @staticmethod
+    #@profile
+    def build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type=2, 
+                       compute_derivatives=False, dP_inf=None, dF=None, dQc=None):
+        """
+        TODO: introduce P0 for covariance and P_inf for noise calculation.
+        K - block size
+        
+        Input:
+        ----------------------------------
+        
+        dP_inf: matrix[K,K,  grad_params_no ]
+            Derivatives of P_inf. Derivatives along the 3-rd dimension.            
+            
+        Output:
+        ----------------------------------
+            Ki_D: matrix(N*K, K)
+                Diagonal of the Ki matrix, diagonal blocks are in block-column
+            Ki_C: matrix((N-1)*K, K)
+                Subdiagonal of he Ki matrix, subdiagonal blocks are in block-column
+            Ki_DN: matrix(N*K, K)
+                The same as Ki_D plus HtH to each block
+            d_Ki_D: matrix(N*K, K*deriv_num)
+                Derivatives of the matrix Ki_D, derivatives are row-wise
+            d_Ki_C: matrix((N-1)*K, K*deriv_num)
+                Derivatives of the matrix Ki_C, derivatives are row-wise
+            
+        """
+        #import pdb; pdb.set_trace()
+        K = F.shape[0] # block_size
+        N = X.shape[0]
+        
+        # Allocating space ->
+        Ki_diag = np.empty( (K*N, K) )
+        Ki_low_diag = np.empty( (K*(N-1), K))  
+        Ki_logdet = np.empty((N,))
+        
+        if compute_derivatives:
+            grad_params_no = dF.shape[2]
+            
+            d_Ki_diag = np.empty( (K*N, K*grad_params_no) )
+            d_Ki_low_diag = np.empty( (K*(N-1), K*grad_params_no) )
+            d_Ki_logdet = np.empty((N,grad_params_no))
+        else:
+            grad_params_no = 1
+            d_Ki_diag = None
+            d_Ki_low_diag = None
+            d_Ki_logdet = None
+        # Allocating space <-
+        
+        # dt handling ->
+        dt = np.diff(X,axis=0)
+        if np.any(dt < 1e-3):
+            raise ValueError("btd_inference.build_matrices: small dt explore!")
+        
+        AQcomp = btd_inference.AQcompute_batch_Python(F,L,Qc,dt, compute_derivatives, grad_params_no, P_inf, dP_inf, dF, dQc)
+        # dt handling <-
+        
+        # First diagonal block computation ->
+        P_inf = 0.5*(P_inf + P_inf.T)
+        P_inf_inv, new_S = btd_inference.psd_matrix_inverse(0, P_inf, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
+        
+        Ki_diag[0:K,:] = P_inf_inv
+        Ki_logdet[0] = np.sum( np.log( new_S[ new_S > 0.0] ) )
+        
+        #import pdb; pdb.set_trace()
+        if compute_derivatives:
+            # Derivative are of shape Dir[K,K, grad_params_no] - along the third dimension.            
+            # 1) Multiply each derivative by matrix A in front: np.dot(A, np.rollaxis(Dir,1))
+            # the result is of the same shape [K,K, grad_params_no]
+            
+            # 2) Multiply each derivative by matrix A from back. Deriv. matrices as before of
+            # Dir[K,K, grad_params_no], operation: np.dot(np.rollaxis(Dir,2), A)
+            # the result is of the shape [grad_params_no,K,K]
+            
+            # 3) Shape Dir[grad_params_no,K,K] multiply from the BACK by matrix A[K,K]:
+            #    np.dot(Dir,A). Resulting shape is the same: [grad_params_no,K,K]
+            
+            # 4) Shape Dir[grad_params_no,K,K] multiply from the FRONT by matrix A[K,K]:
+            #    np.dot( A, np.transpose(Dir,(2,1,0)) ). New shape is [K,K, grad_params_no].
+            
+            # 5) From the Dir[grad_params_no,K,K] shape of derivative matrix make
+            # [K,k*grad_params_no]: np.rollaxis(Dir,1).reshape(K,K*grad_params_no)
+            
+            # 6) From the Dir[K,K,grad_params_no] shape of derivative matrix make
+            # [K,k*grad_params_no]: Dir.transpose((0,2,1)).reshape(K,K*grad_params_no)
+            
+            # 7) From shape Dir[K,K,grad_params_no] to shape Dir[grad_params_no,K,K]:
+            #    np.rollaxis(Dir,2)
+            
+            # 8) From Dir[grad_params_no,K,K] to the right shape Dir[K,K*grad_params_no]:
+                # np.rollaxis(Dir,1).reshape(K,K*grad_params_no)
+            
+            # 9) From Dir[K,K,grad_params_no] to the right shape Dir[K,K*grad_params_no]:
+            #    Dir.transpose((0,2,1)).reshape(K,K*grad_params_no)
+            
+            # Implement formula: d{Pi^{-1}}/dp = -Pi^{-1} d{Pi}/dp Pi^{-1}
+            # 0-th diagonal block computation ->
+            #tmp0 = -np.dot(P_inf_inv, np.rollaxis(dP_inf,1) ) # shapse is [K,K, grad_params_no]
+            tmp0 = -np.dot( np.rollaxis(dP_inf,2), P_inf_inv ) # shape is [grad_params_no,K,K]
+            
+            #tmp1 = np.dot(np.rollaxis(tmp0,2), P_inf_inv) # shapse is [grad_params_no,K,K]
+            tmp1 = np.dot( P_inf_inv, np.transpose(tmp0,(2,1,0)) ) # shape is [K,K, grad_params_no]
+            
+            #d_Ki_diag[0:K,:] = np.rollaxis(tmp1,1).reshape(K,K*grad_params_no)
+            d_Ki_diag[0:K,:] = tmp1.transpose((0,2,1)).reshape(K,K*grad_params_no)
+            # 0-th diagonal block computation <-
+            
+            d_Ki_logdet[0,:] = np.trace(tmp0, axis1=1, axis2=2)
+        # First diagonal block computation <-
+            
+        #import pdb; pdb.set_trace()
+        for k in range(0,N-1):
+            Ak = AQcomp.Ak(k,None,None)
+            Qk = AQcomp.Qk(k)
+            Qk = 0.5*(Qk + Qk.T) # symmetrize because if Qk is not full rank it becomes not symmetric due to numerical problems
+            #import pdb; pdb.set_trace()
+            Qk_inv, new_S = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type) # in AQcomp numbering starts from 0, consequence of Python indexing.
+            
+            
+            Ki_low_diag[(k)*K:(k+1)*K, :] = - np.dot( Qk_inv, Ak )
+            
+            Ki_diag[ (k)*K:(k+1)*K, :] += np.dot( Ak.T, np.dot( Qk_inv, Ak ) ) # update previous diagonal element
+            Ki_diag[ (k+1)*K:(k+2)*K, :] = Qk_inv
+            
+            # Log determinant computation ->
+            if new_S is None:
+                Ki_logdet[k+1] = Ki_logdet[k]
+            else:
+                Ki_logdet[k+1] = np.sum( np.log( new_S[ new_S > 0.0] ) )            
+            # Log determinant computation <-
+        
+            if compute_derivatives:
+                dAk = AQcomp.dAk(k) # Direvative are along the 3-d dimension e.g Ak[K,K,grad_params_no]
+                dQk = AQcomp.dQk(k) # Direvative are along the 3-d dimension Qk[K,K,grad_params_no]
+                
+                dQk = 0.5*( dQk + np.rollaxis(dQk, 1 ) ) # Symmetrize dQk, checked
+                # Current iteration diagonal ->
+                #tmp0 = -np.dot(Qk_inv, np.rollaxis(dQk,1) ) # shape [K,K, grad_params_no]
+                tmp0 = -np.dot( np.rollaxis(dQk,2), Qk_inv ) # shape is [grad_params_no,K,K] (Rule 6)
+                #tmp1 = np.dot(np.rollaxis(tmp0,2), Qk_inv) # shape [grad_params_no,K,K], contains 
+                tmp1 = np.dot( Qk_inv, np.transpose(tmp0,(2,1,0)) ) # shape is [K,K, grad_params_no] (Rule 4)
+                    # dQ^{-1} / dp
+                #d_Ki_diag[ (k+1)*K:(k+2)*K, :] = np.rollaxis(tmp1,1).reshape(K,K*grad_params_no)
+                d_Ki_diag[ (k+1)*K:(k+2)*K, :] = tmp1.transpose((0,2,1)).reshape(K,K*grad_params_no) # shape is 
+                # Current iteration diagonal <-
+                
+                # Derivatives of Log determinant computation ->
+                d_Ki_logdet[k+1,:] = np.trace(tmp0, axis1=1, axis2=2)
+                # Derivatives of Log determinant computation <-
+                
+                # This iteration off-diagonal ->
+                # tmp1 contains d{Qi^{-1}}/dp = -Qi^{-1} d{Qi}/dp Qi^{-1} of shape [grad_params_no,K,K]
+                #tmp2 = np.dot(tmp1, Ak) # shape of result is [grad_params_no,K,K]
+                tmp2 = np.dot(np.rollaxis(tmp1,2), Ak) # shape of result is [grad_params_no,K,K]
+                tmp3 = np.dot(Qk_inv, np.rollaxis(dAk,1)) # shape of result is [K,K,grad_params_no] (Rule 5)
+                
+                tmp2 = np.rollaxis(tmp2,1).reshape(K,K*grad_params_no)
+                tmp3 = tmp3.transpose((0,2,1)).reshape(K,K*grad_params_no)
+                
+                d_Ki_low_diag[(k)*K:(k+1)*K, :] = -1*(tmp2+tmp3)
+                # This iteration off-diagonal <-
+                
+                # Update previous iteration diagonal ->
+                tmp4 = np.dot(Ak.T,tmp3)
+                d_Ki_diag[ (k)*K:(k+1)*K, :] += np.dot(Ak.T,tmp2) + tmp4 + \
+                   btd_inference.transpose_submatrices(tmp4, grad_params_no, K, row=True)
+                # Update previous iteration diagonal <-
+            else:
+                d_Ki_diag = None
+                d_Ki_low_diag = None
+                d_Ki_logdet = None
+                
+        return Ki_diag, Ki_low_diag, Ki_logdet.sum(), d_Ki_diag if d_Ki_diag is not None else None, \
+                d_Ki_low_diag, d_Ki_logdet.sum(axis=0) if d_Ki_logdet is not None else None
+        
+    def test_marginal_ll(Y, Ki, Ki_logdet, H, g_noise_var, 
+                    compute_derivatives=False, d_Ki=None, d_Ki_logdet = None):
+        """
+        Input:
+        ------------------
+        """
+        #import pdb; pdb.set_trace()
+        N = Y.shape[0] # number of data points
+        
+        g_noise_var = float(g_noise_var)
+        
+        HtH = np.dot(H.T, H)
+        Gt = np.kron( np.eye(N), H.T )
+        GtY = np.dot( Gt, Y)        
+        
+        M = Ki + np.kron( np.eye(N), HtH) / g_noise_var # G^{T} \Sigma^{-1} G
+        _, mll_log_det = np.linalg.slogdet(M)
+        mll_log_det += (Y.size)*np.log(g_noise_var) - Ki_logdet
+        
+        mll_data_fit_term = np.dot(Y.T, Y)/g_noise_var - np.dot(GtY.T, np.linalg.solve( M , GtY ) )/g_noise_var**2
+        marginal_ll = -0.5*(mll_data_fit_term + mll_log_det + (Y.size)*log_2_pi)
+        
+        #import pdb; pdb.set_trace()
+        if compute_derivatives:
+            grad_params_no = d_Ki.shape[0]                
+            
+            mll_data_fit_deriv = np.empty( (grad_params_no+1,1) ) # including noise
+            mll_determ_deriv = np.empty( (grad_params_no+1,1) ) # including noise
+            
+            tmp0 = np.linalg.solve(M , GtY)
+            for k in range(0, grad_params_no):
+                
+                mll_data_fit_deriv[k,0] = np.dot( tmp0.T, np.dot( d_Ki[k,:,:], tmp0 ) )/ g_noise_var**2
+                
+                mll_determ_deriv[k,0] = np.trace( np.linalg.solve( M, d_Ki[k,:,:] ) ) - d_Ki_logdet[k] + 0
+            
+            tmp1 = np.dot(Gt.T, tmp0)
+            
+            mll_data_fit_deriv[-1,0] = -np.dot(Y.T,Y)/ g_noise_var**2 + 2.0*np.dot( GtY.T, tmp0)/g_noise_var**3 - \
+                                        np.dot(tmp1.T, tmp1)/g_noise_var**4
+                                     
+                    # derivative wrt noise
+            mll_determ_deriv[-1,0] = -np.trace( np.linalg.solve( M, np.dot(Gt,Gt.T) ) )/g_noise_var**2 + N/g_noise_var  # derivative wrt noise
+            
+            d_marginal_ll = -0.5*( mll_data_fit_deriv + mll_determ_deriv)
+        
+        #import pdb; pdb.set_trace()
+        return marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, mll_data_fit_deriv, mll_determ_deriv
+        
+    @staticmethod
+    def marginal_ll(K, Y, Ki_diag, Ki_low_diag, Ki_logdet, H, g_noise_var, 
+                    compute_derivatives=False, d_Ki_diag=None, d_Ki_low_diag=None,
+                    d_Ki_logdet = None):
+                
+        """
+        Function computes marginal likelihood and its derivatives.
+        
+        Input:
+        --------------------
+        
+        K: int
+            Block size
+        Y matrix[N,1]
+            Measurements as a [N,1] column
+        """
+        #import pdb; pdb.set_trace()
+        N = Y.shape[0] # number of data points
+        
+        g_noise_var = float(g_noise_var)
+        
+        HtH = np.dot(H.T, H)        
+        KiN_diag = Ki_diag +  np.tile( HtH/g_noise_var, (N,1) )       
+        
+        GtY =  np.tile(H.T, (N,1)) * Y.repeat(K, axis=0)       
+        
+        KiN_logdet, KiNiGtY, _, inc_com = \
+            btd_inference.block_tridiag_solver(N,K, KiN_diag, Ki_low_diag, GtY, rhs_diag=False, inversion_comp=None, rhs_C_matr=None,
+                             comp_matrix_determinant=True, comp_solution=True, comp_solution_trace=False)
+        
+        mll_log_det = -Ki_logdet# ignoring 0.5 and - sign.
+        mll_log_det += KiN_logdet
+        mll_log_det += (Y.size)*np.log(g_noise_var)
+        
+
+        tmp1 = np.dot(GtY.T, KiNiGtY)
+        mll_data_fit_term = ( np.dot(Y.T,Y) /g_noise_var - tmp1/g_noise_var**2 ) # ignoring 0.5 and - sign.        
+        marginal_ll = -0.5 * ( mll_log_det + mll_data_fit_term + (Y.size)*log_2_pi)
+        
+        #import pdb; pdb.set_trace()
+        d_marginal_ll = None
+        if compute_derivatives:
+            grad_params_no = int( d_Ki_diag.shape[1]/K )
+            
+            mll_data_fit_deriv = np.empty( (grad_params_no+1,1) ) # including noise
+            mll_determ_deriv = np.empty( (grad_params_no+1,1) ) # including noise
+            
+            noise_square = g_noise_var**2            
+            
+            tmp3 = btd_inference.btd_times_vector( d_Ki_diag,  KiNiGtY, d_Ki_low_diag, grad_params_no )
+            
+            mll_data_fit_deriv[0:-1,0] = np.dot( KiNiGtY.T, tmp3 ) / noise_square # without noise derivative.
+            
+            tmp4 = btd_inference.btd_times_vector( np.tile(H, (N,1)),  KiNiGtY, None, 1, 1 )
+            mll_data_fit_deriv[-1,0] = 1.0/noise_square* ( -np.dot( Y.T, Y) + 2.0* tmp1/g_noise_var -
+                np.dot(tmp4.T, tmp4)/noise_square)
+            
+            d_Ki_diag = np.hstack( (d_Ki_diag, np.tile( HtH, (N,1))) )# add noise related part to calculate noise drivative as well
+                # ignore 1/g_noise_var for now
+            d_Ki_low_diag = np.hstack( (d_Ki_low_diag, np.zeros( ((N-1)*K, K)) ) )
+            
+            # def block_tridiag_solver(N,K, A_matr, C_matr, rhs_D_matr, rhs_diag=False, inversion_comp=None, rhs_C_matr=None,
+            #                 comp_matrix_determinant=False, comp_solution=False, comp_solution_trace=False,
+            #                 rhs_block_num=None, rhs_block_width = None, front_multiplier=None)
+                             
+            (_,_,tmp5,_) = btd_inference.block_tridiag_solver(N,K, KiN_diag, Ki_low_diag, d_Ki_diag, rhs_diag=True, 
+                                                      inversion_comp=inc_com,  rhs_C_matr=d_Ki_low_diag,
+                             comp_matrix_determinant=False, comp_solution=False, comp_solution_trace=True, rhs_block_num=grad_params_no+1, rhs_block_width = K)
+            
+            # The first determinant derivative: logdet( K1^{-1} + Gt \Sigma G )
+            mll_determ_deriv[:,0] = tmp5;  mll_determ_deriv[-1,0] = -mll_determ_deriv[-1,0]/g_noise_var**2 # take into account earlier ignored division
+            mll_determ_deriv[:-1,0] -= d_Ki_logdet
+            mll_determ_deriv[-1,0] += N/g_noise_var 
+            
+            d_marginal_ll = -0.5*( mll_determ_deriv + mll_data_fit_deriv)
+            
+            
+        return marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, mll_data_fit_deriv, mll_determ_deriv
+    
+    
+    @staticmethod
+    def mean_var_calc_prepare_matrices(K, X_train, X_test, Y_train, var_or_likelihood, F, L, Qc, P_inf, H,
+                                       p_largest_cond_num=1e+13, p_regularization_type=2, diff_x_crit=None):
+        
+        """
+        
+        Input:
+        ---------------------
+        
+        p_regularization_type: 1 or 2
+        
+        
+        p_largest_cond_num: float
+            Largest condition number of the Qk matices. See function 
+            "sparse_inverse_cov".
+        
+        
+        
+        diff_x_crit: float (not currently used)   
+            If new X_test points are added, this tells when to consider 
+            new points to be distinct. If it is None then the same variable
+            is taken from the class.
+            
+        """
+        
+        if diff_x_crit is not None: # currently not implememted
+            pass
+            
+        #import pdb; pdb.set_trace()  
+        if (X_test is None) or (X_test is X_train) or ( (X_test.shape == X_train.shape) and np.all(X_test == X_train) ):
+            # Consider X_test is equal to X_train
+            X_test = None            
+            test_points_num = None
+            
+        if X_test is not None:
+            test_points_num = X_test.shape[0]
+            
+            X = np.vstack((X_train, X_test))
+            Y = np.vstack((Y_train, np.zeros(X_test.shape)) )
+            
+            which_train = np.vstack( ( np.ones( X_train.shape), np.zeros( X_test.shape)) )
+            
+            _, return_index, inverse_index = np.unique(X,True,True)
+             
+            X = X[return_index]
+            Y = Y[return_index]
+            which_train = which_train[return_index]
+            
+        else:
+            X = X_train
+            Y = Y_train
+            which_train = np.ones(X_train.shape)
+        
+            inverse_index = None
+            return_index = None
+            
+        Ki_diag, Ki_low_diag,_ ,_ ,_ ,_ = btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type=2, 
+                       compute_derivatives=False, dP_inf=None, dF=None, dQc=None)
+        
+        return Ki_diag, Ki_low_diag, test_points_num, return_index, inverse_index
+        
+    @staticmethod
+    def mean_var_calc(K, Y, Ki_diag, Ki_low_diag, H, g_noise_var, test_points_num, forward_index, inverse_index):
+        """
+        Compute mean and variance of gaussian process.
+        
+        Input:
+        ------------------
+        
+        K: int
+            Block Size
+            
+        Y: vector(N,1)
+             Original training points
+        
+        which_observed: vector(N,)
+            Vector of the same size as Y where 1 indicates that this is a trainig point
+            while 0 indicates that this is a test point.             
+             
+        Ki_diag: matrix( N*K, K)
+            BTD diagonal
+            
+        Ki_low_diag: matrix
+        
+        H:
+        
+        g_noise_var:
+    
+        """
+        if forward_index is not None:
+            which_train = np.vstack( ( np.ones(Y.shape), np.zeros( (test_points_num,1) )) )
+            which_train = which_train[forward_index]
+            
+            Y = np.vstack(  ( Y, np.zeros((test_points_num,1)) )  )
+            Y = Y[forward_index]
+        else:
+            which_train = np.ones(Y.shape)
+            test_points_num = Y.shape[0] # output all points
+             
+        which_train_repeated = np.repeat(which_train, K, axis=0)
+        Y_repeated = np.repeat(Y, K, axis=0)
+        
+        N = Y.shape[0]
+        HtH = np.dot(H.T, H)        
+        
+        Ht_repeted = np.tile( H.T, (N,1) )        
+        
+        KiN_diag = Ki_diag + np.tile(HtH, (N,1)) * np.tile( which_train_repeated, (1,K) ) / g_noise_var
+        rhs = Ht_repeted * Y_repeated / g_noise_var
+        
+        _,means,_,inversion_comp = btd_inference.block_tridiag_solver(N,K, KiN_diag, Ki_low_diag, rhs, rhs_diag=False, inversion_comp=None, rhs_C_matr=None,
+                             comp_matrix_determinant=False, comp_solution=True, comp_solution_trace=False,
+                             rhs_block_num=None, rhs_block_width = None, front_multiplier= None )
+                             
+        means = np.sum( np.tile(H, (N,1) ) * means.reshape((N,K)), axis=1)
+        if inverse_index is not None:
+            means = means[inverse_index]; 
+        means.shape = (means.shape[0],1)
+        
+        if test_points_num is not None:
+            means = means[-test_points_num:]        
+        
+        _,variances,_,_ = btd_inference.block_tridiag_solver(N, K, KiN_diag, Ki_low_diag, Ht_repeted, rhs_diag=True, inversion_comp=inversion_comp, rhs_C_matr=None,
+                             comp_matrix_determinant=False, comp_solution=True, comp_solution_trace=False,
+                             rhs_block_num=None, rhs_block_width = None, front_multiplier= H )
+                             
+        if inverse_index is not None:                     
+            variances = variances[inverse_index]
+        
+        if test_points_num is not None:
+            variances = variances[-test_points_num:] 
+        
+        return means, variances
