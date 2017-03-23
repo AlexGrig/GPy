@@ -246,7 +246,7 @@ class ComputationalRoutinesTests(np.testing.TestCase):
         tt4 = np.max( np.abs(r3- true_trace) ) if ((rhs_block_width == K) and  (front_multiplier is None)) else None       
         
         np.testing.assert_array_almost_equal(tt1, 0, decimal=8)
-        np.testing.assert_array_almost_equal(tt3, 0, decimal=12)
+        np.testing.assert_array_almost_equal(tt3, 0, decimal=11)
         
         if tt4 is not None:
             np.testing.assert_array_almost_equal(tt4, 0, decimal=8)
@@ -607,6 +607,7 @@ class SparsePrecitionMLLTests(np.testing.TestCase):
         
         #import pdb; pdb.set_trace()
         
+        
         if run_sparse_test:
             _, _, Ki_logdet_true, _, _, d_Ki_logdet_true, Ki, dKi = btd_inference.test_build_matrices(x_data, y_data, 
                                F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type, 
@@ -621,8 +622,8 @@ class SparsePrecitionMLLTests(np.testing.TestCase):
         if run_sparse_btd:
             
             Ki_diag, Ki_low_diag, Ki_logdet, d_Ki_diag, d_Ki_low_diag, d_Ki_logdet = btd_inference.build_matrices(x_data, y_data, 
-                        F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type, 
-                        compute_derivatives=True, dP_inf= dP_inft, dF=dFt, dQc= dQct)
+                        F, L, Qc, P_inf, P0, H, p_largest_cond_num, p_regularization_type, 
+                        compute_derivatives=True, dP_inf= dP_inft, dP0 = dP0t, dF=dFt, dQc= dQct)
             
             #import pdb; pdb.set_trace()
             marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, mll_data_fit_deriv, mll_determ_deriv = btd_inference.marginal_ll(block_size, 
@@ -854,8 +855,8 @@ class SparsePrecitionMLLTests(np.testing.TestCase):
                        True, dP_inft, dFt, dQct)
                        
         Ki_diag, Ki_low_diag, Ki_logdet, d_Ki_diag, d_Ki_low_diag, d_Ki_logdet = \
-            btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type, 
-                       True, dP_inft, dFt, dQct)
+            btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, p_regularization_type, 
+                       True, dP_inft, dP0t, dFt, dQct)
         
         #import pdb;pdb.set_trace()
         #t1 = np.max(np.abs() )
@@ -1256,12 +1257,12 @@ class SparsePrecitionTests(np.testing.TestCase):
         
         # Kernel <-
                                        
-        Ki_diag_true, Ki_low_diag_true, _,_,_,_ = btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type, 
-                       compute_derivatives=False, dP_inf=None, dF=None, dQc=None)
+        Ki_diag_true, Ki_low_diag_true, _,_,_,_ = btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, p_regularization_type, 
+                       compute_derivatives=False, dP_inf=None, dP0=None, dF=None, dQc=None)
                        
                        
         Ki_diag, Ki_low_diag, _,_,_ = btd_inference.mean_var_calc_prepare_matrices(block_size, x_train_data, x_test_data, 
-                                     y_train_data, noise_var, F, L, Qc, P_inf, H,
+                                     y_train_data, noise_var, F, L, Qc, P_inf, P0, H,
                                        p_largest_cond_num, p_regularization_type, diff_x_crit=None)        
                                        
         #import pdb; pdb.set_trace()
@@ -1373,7 +1374,7 @@ class SparsePrecitionTests(np.testing.TestCase):
         
         Ki_diag, Ki_low_diag, test_points_num, forward_index, inverse_index = \
                 btd_inference.mean_var_calc_prepare_matrices(block_size, x_train_data, x_test_data, 
-                                     y_train_data, noise_var, F, L, Qc, P_inf, H,
+                                     y_train_data, noise_var, F, L, Qc, P_inf, P0, H,
                                        p_largest_cond_num, p_regularization_type, diff_x_crit=None)
                                        
         sp_mean, sp_var = btd_inference.mean_var_calc(block_size, y_train_data, Ki_diag, 
@@ -1426,54 +1427,50 @@ if __name__ == "__main__":
 #    print("Running sparse precision inference tests...")
 #    unittest.main()
     
-    tt = ComputationalRoutinesTests('test_btd_system_solution1')
-    tt.test_btd_system_solution1()
-    
-    tt = ComputationalRoutinesTests('test_btd_system_solution2')
-    tt.test_btd_system_solution2()
-    
-    tt = ComputationalRoutinesTests('test_reg_system_solution')
-    tt.test_reg_system_solution()
-    
-    tt = ComputationalRoutinesTests('test_TransposeSubmatrices')
-    tt.test_TransposeSubmatrices()
-    
-    tt = ComputationalRoutinesTests('test_BTD_multiplication')
-    tt.test_BTD_multiplication()
+#    tt = ComputationalRoutinesTests('test_btd_system_solution1')
+#    tt.test_btd_system_solution1()
+#    
+#    tt = ComputationalRoutinesTests('test_btd_system_solution2')
+#    tt.test_btd_system_solution2()
+#    
+#    tt = ComputationalRoutinesTests('test_reg_system_solution')
+#    tt.test_reg_system_solution()
+#    
+#    tt = ComputationalRoutinesTests('test_TransposeSubmatrices')
+#    tt.test_TransposeSubmatrices()
+#    
+#    tt = ComputationalRoutinesTests('test_BTD_multiplication')
+#    tt.test_BTD_multiplication()
+#
+#    tt = SparsePrecitionMLLTests('test_test_Matern52_kernel')
+#    tt.test_test_Matern52_kernel()
+#
+#    tt = SparsePrecitionMLLTests('test_test_Complex_kernel')
+#    tt.test_test_Complex_kernel()
 
-    tt = SparsePrecitionMLLTests('test_test_Matern52_kernel')
-    tt.test_test_Matern52_kernel()
-
-    tt = SparsePrecitionMLLTests('test_test_Complex_kernel')
-    tt.test_test_Complex_kernel()
-
-    tt = SparsePrecitionMLLTests('test_build_matrix_Matern52')
-    tt.test_build_matrix_Matern52()
- 
-    tt = SparsePrecitionMLLTests('test_build_matrix_RBF')
-    tt.test_build_matrix_RBF()
+#    tt = SparsePrecitionMLLTests('test_build_matrix_Matern52')
+#    tt.test_build_matrix_Matern52()
+# 
+#    tt = SparsePrecitionMLLTests('test_build_matrix_RBF')
+#    tt.test_build_matrix_RBF()
     
-    tt = SparsePrecitionMLLTests('test_Matern52_kernel')
-    tt.test_Matern52_kernel()
- 
-    tt = SparsePrecitionMLLTests('test_Complex_kernel')
-    tt.test_Complex_kernel()
-     
-    tt = SparsePrecitionTests('test_mean_var_prepare_matrices1')
-    tt.test_mean_var_prepare_matrices1()
+#    tt = SparsePrecitionMLLTests('test_Matern52_kernel')
+#    tt.test_Matern52_kernel()
+# 
+#    tt = SparsePrecitionMLLTests('test_Complex_kernel')
+#    tt.test_Complex_kernel()
+#     
+#    tt = SparsePrecitionTests('test_mean_var_prepare_matrices1')
+#    tt.test_mean_var_prepare_matrices1()
     
-    tt = SparsePrecitionTests('test_mean_var_prepare_matrices2')
-    tt.test_mean_var_prepare_matrices2()
-    
-    tt = SparsePrecitionTests('test_mean_var_prepare_matrices3')
-    tt.test_mean_var_prepare_matrices3()
-     
+#    tt = SparsePrecitionTests('test_mean_var_prepare_matrices2')
+#    tt.test_mean_var_prepare_matrices2()
+#    
+#    tt = SparsePrecitionTests('test_mean_var_prepare_matrices3')
+#    tt.test_mean_var_prepare_matrices3()
+#    
     tt = SparsePrecitionTests('test_mean_var_calc')
     tt.test_mean_var_calc()
-    
-    
-    
-    
     
     
     #tt = SparsePrecitionTests('test_sde_sparse_1')

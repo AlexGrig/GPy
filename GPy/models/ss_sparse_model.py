@@ -108,13 +108,25 @@ class SparcePrecisionGP(GP):
             this method yourself, there may be unexpected consequences.
         """
         #import pdb; pdb.set_trace()
-        log_marginal_ll, d_log_marginal_ll, self._mll_call_tuple, self._mll_call_dict \
-            = ss.SparsePrecision1DInference.inference(self.kern, 
-                                                   self.X, self.Y, self.likelihood , self.balance, self.largest_cond_num,self.regularization_type)
         
-        self._log_marginal_likelihood = log_marginal_ll
-        self.likelihood.update_gradients(d_log_marginal_ll[-1,0])
-        self.kern.sde_update_gradient_full(d_log_marginal_ll[:-1,0])
+#        log_marginal_ll, d_log_marginal_ll, self._mll_call_tuple, self._mll_call_dict \
+#            = ss.SparsePrecision1DInference.inference(self.kern, 
+#                                                   self.X, self.Y, self.likelihood , self.balance, self.largest_cond_num,self.regularization_type)
+        marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, \
+        mll_data_fit_deriv, mll_determ_deriv =  ss.SparsePrecision1DInference.inference(self.kern, self.X, self.Y, 
+                self.likelihood, self.balance, self.largest_cond_num,self.regularization_type)
+        
+        self.likelihood.update_gradients(d_marginal_ll[-1,0])
+        self.kern.sde_update_gradient_full(d_marginal_ll[:-1,0])
+        self._log_marginal_likelihood = marginal_ll
+        
+        self._marginal_ll = marginal_ll
+        self._d_marginal_ll = d_marginal_ll
+        self._mll_data_fit_term = mll_data_fit_term
+        self._mll_log_det = mll_log_det
+        self._mll_data_fit_deriv = mll_data_fit_deriv
+        self._mll_determ_deriv = mll_determ_deriv
+        
         
     def _raw_predict(self, Xnew=None, p_balance=None, p_largest_cond_num=None, p_regularization_type=None):
         """
@@ -141,9 +153,13 @@ class SparcePrecisionGP(GP):
         else:
             balance = p_balance
             
-        mean, var, _ = ss.SparsePrecision1DInference.mean_and_var(self.kern, self.X, self.Y, self.likelihood, Xnew, 
-                     balance, largest_cond_num, regularization_type, self._mll_call_tuple, self._mll_call_dict)
+#        mean, var, _ = ss.SparsePrecision1DInference.mean_and_var(self.kern, self.X, self.Y, self.likelihood, Xnew, 
+#                     balance, largest_cond_num, regularization_type, self._mll_call_tuple, self._mll_call_dict)
                     
+        mean, var = ss.SparsePrecision1DInference.mean_and_var(self.kern, 
+                        self.X, self.Y, self.likelihood, Xnew, balance, 
+                        largest_cond_num, regularization_type, diff_x_crit=None)
+                     
         return mean, var
 
     def predict(self, Xnew, include_likelihood=True, balance=None, largest_cond_num=None, regularization_type=None):

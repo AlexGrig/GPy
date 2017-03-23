@@ -3355,11 +3355,9 @@ class ContDescrStateSpace(DescreteStateSpace):
         n = F.shape[0]
 
         if not isinstance(dt, collections.Iterable): # not iterable, scalar
-
+            #import pdb; pdb.set_trace()
             # The dynamical model
             A  = matrix_exponent(F*dt)
-            if np.any( np.isnan(A)):
-                A  = linalg.expm3(F*dt)
 
             # The covariance matrix Q by matrix fraction decomposition ->
             Phi = np.zeros((2*n,2*n))
@@ -3404,9 +3402,11 @@ class ContDescrStateSpace(DescreteStateSpace):
 
                     # The derivatives of A and Q
                     dA[:,:,p] = AA[n:,:n,p]
-                    dQ[:,:,p] = dP_inf[:,:,p] - dA[:,:,p].dot(P_inf).dot(A.T) \
-                       - A.dot(dP_inf[:,:,p]).dot(A.T) - A.dot(P_inf).dot(dA[:,:,p].T) # Rewrite not ro multiply two times
-
+                    tmp = dA[:,:,p].dot(P_inf).dot(A.T)
+                    dQ[:,:,p] = dP_inf[:,:,p] - tmp \
+                       - A.dot(dP_inf[:,:,p]).dot(A.T) - tmp.T
+                    
+                    dQ[:,:,p] = 0.5*(dQ[:,:,p] + dQ[:,:,p].T) # Symmetrize
             else:
               dA = None
               dQ = None
@@ -3419,6 +3419,7 @@ class ContDescrStateSpace(DescreteStateSpace):
             #import pdb; pdb.set_trace()
             #if dt != 0:
             #    Q_noise = Q_noise + np.eye(Q_noise.shape[0])*1e-8
+            Q_noise = 0.5*(Q_noise + Q_noise.T) # Symmetrize
             return A, Q_noise,None, dA, dQ
 
         else: # iterable, array
@@ -3680,16 +3681,15 @@ def psd_matrix_inverse(k,Q, U=None,S=None, p_largest_cond_num=None, regularizati
             # for small eigenvalue corresponding eigenvectors are not very orthogonal.
             ##########Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
         elif (regularization_type == 2):
-            # C = max( C_old/(2 * lamda) + lamda/C_old,  lamda/2 + 1/(2*lamda) ) # first terms are dominating in both parts of max                        
-            lamda_star = np.sqrt(current_conditional_number)
-            if 2*p_largest_cond_num >= lamda_star:
-                lamda = current_conditional_number / 2 / p_largest_cond_num
-                
-                regularizer = (S[-1] * lamda)**2
+            
+             new_border_value = np.sqrt(current_conditional_number)/2 
+             if p_largest_cond_num >= new_border_value: # this type of regularization works
+                regularizer = ( S[0] / p_largest_cond_num / 2.0 )**2
                 
                 Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite
-            else:
-                better_curr_cond_num = (2*p_largest_cond_num)**2 / 2 # division by 2 just in case here
+             else:
+                
+                better_curr_cond_num = new_border_value 
                 warnings.warn("""state_space_main psd_matrix_inverse: reg_type = 2 can't be done completely.
                     Current conditionakl number {0:e} is reduced to {1:e} by reg_type = 1""".format(current_conditional_number, better_curr_cond_num))
                 
@@ -3699,15 +3699,42 @@ def psd_matrix_inverse(k,Q, U=None,S=None, p_largest_cond_num=None, regularizati
                 # It is not very clear how this step is useful but test is here.
                 (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
                                             full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
-                
-                lamda = better_curr_cond_num / 2 / p_largest_cond_num
-                
-                regularizer = (S[-1] * lamda)**2
+                                            
+                regularizer = ( S[0] / p_largest_cond_num / 2.0 )**2
                 
                 Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite
             
-            assert lamda > 10, "Some assumptions are incorrect if this is not satisfied."
-            ######Q_inverse = np.dot( Vh.T * ( S/(S**2 + regularizer)) , U.T )
+             assert regularizer*10 < S[0], "regularizer is not << S[0]"
+             assert regularizer > 10*S[-1], "regularizer is not >> S[-1]"
+             
+# Old version ->
+#            lamda_star = np.sqrt(current_conditional_number)
+#            if 2*p_largest_cond_num >= lamda_star:
+#                lamda = current_conditional_number / 2 / p_largest_cond_num
+#                
+#                regularizer = (S[-1] * lamda)**2
+#                
+#                Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite
+#            else:
+#                better_curr_cond_num = (2*p_largest_cond_num)**2 / 2 # division by 2 just in case here
+#                warnings.warn("""state_space_main psd_matrix_inverse: reg_type = 2 can't be done completely.
+#                    Current conditionakl number {0:e} is reduced to {1:e} by reg_type = 1""".format(current_conditional_number, better_curr_cond_num))
+#                
+#                regularizer = S[0] / better_curr_cond_num
+#                # the second computation of SVD is done to compute more precisely singular
+#                # vectors of small singular values, since small singular values become large.
+#                # It is not very clear how this step is useful but test is here.
+#                (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
+#                                            full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+#                
+#                lamda = better_curr_cond_num / 2 / p_largest_cond_num
+#                
+#                regularizer = (S[-1] * lamda)**2
+#                
+#                Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite
+#            
+#            assert lamda > 10, "Some assumptions are incorrect if this is not satisfied."
+# Old version <-            
         else:
             raise ValueError("AQcompute_batch_Python:Q_inverse: Invalid regularization type")
     
@@ -3715,27 +3742,5 @@ def psd_matrix_inverse(k,Q, U=None,S=None, p_largest_cond_num=None, regularizati
         Q_inverse_r = np.dot( U * 1.0/S , U.T ) # Assume Q_inv is positive definite
     # When checking conditional number 2 times difference is ok.
     Q_inverse_r = 0.5*(Q_inverse_r + Q_inverse_r.T)
-
-
-
-
-#    # Old version when we assign jitter rather then maximal conditional number.
-#    # Regularization_type: int (1 or 2)
-#    #            type 1: 1/(S[k] + S[0]*jitter)
-#    #            type 2: S[k]/(S^2[k] + S[0]*jitter) 
-#    jitter = p_largest_cond_num
-#    regularizer = S[0]*jitter if S[0] > jitter else jitter
-#    if (regularization_type == 1):
-#        Q_inverse_r = np.dot( U * ( 1.0/(S + regularizer)) , U.T ) # Assume Q_inv is positive definite    
-#        
-#        # In this case, RBF kernel we get complx eigenvalues. Probably
-#        # for small eigenvalue corresponding eigenvectors are not very orthogonal.
-#        #Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
-#    elif (regularization_type == 2):
-#        Q_inverse_r = np.dot( U * ( S/(S**2 + regularizer)) , U.T ) # Assume Q_inv is positive definite  
-#        #Q_inverse = np.dot( Vh.T * ( S/(S**2 + regularizer)) , U.T )
-#    else:
-#        raise ValueError("AQcompute_batch_Python:Q_inverse: Invalid regularization type")
-#    Q_inverse_r = 0.5*(Q_inverse_r + Q_inverse_r.T)
 
     return Q_inverse_r

@@ -49,8 +49,143 @@ def solve_ols_svd(U,S,Vh, Y, lamda = 0.0 ):
         num_rank = None # numerical rank is None because regularization is used
     
     return coeffs, num_rank
-    
+
 class SparsePrecision1DInference(LatentFunctionInference):
+    """
+    Sparce Precision 1D Inference
+    """
+    def __init__(self):
+        pass
+    
+#    diff_x_crit = 1e-14 # if new X_test points are added, this tells when
+#                        # to consider new points to be distinct.     
+    
+    @staticmethod
+    def inference(kernel, X, Y, var_or_likelihood, p_balance=False, p_largest_cond_num=1e+16, p_regularization_type=2):
+        """
+        Returns marginal likelihood (MLL), MLL gradient, and dicts with variaous input matrices.
+        
+        Inputs:
+        ------------------------
+        
+        kernel: kernel object
+        
+        X: array(N,1)
+        
+        Y: array(N,1)
+        
+        var_or_likelihood: either likelihood object or float with noise variance.
+        
+        p_balance: bool
+            Balance general mode or not
+            
+        p_largest_cond_num: float
+            Largest condition number of the Qk matices. See function 
+            "sparse_inverse_cov".
+            
+        p_regularization_type: 1 or 2
+        
+        """
+        
+        if isinstance(var_or_likelihood, likelihoods.Gaussian):
+            noise_var = float(var_or_likelihood.gaussian_variance() )
+        elif isinstance(var_or_likelihood, float):
+            noise_var = var_or_likelihood
+        else:
+            raise ValueError("SparsePrecision1DInference.inference: var_or_likelihood has incorrect type.")
+        
+        #import pdb; pdb.set_trace()
+         
+        (F,L,Qc,H,P_inf, P0, dFt,dQct,dP_inft, dP0t) = kernel.sde()
+        block_size = F.shape[1]    
+        
+        if p_balance:
+            (F,L,Qc,H,P_inf,P0, dF,dQct,dP_inft,dP0t) = ssm.balance_ss_model(F,L,Qc,H,P_inf,P0, dFt,dQct,dP_inft, dP0t)
+            print("SparsePrecision1DInference.inference: Balancing!")
+        
+        Ki_diag, Ki_low_diag, Ki_logdet, d_Ki_diag, d_Ki_low_diag, \
+                   d_Ki_logdet = btd_inference.build_matrices(X, Y, 
+                   F, L, Qc, P_inf, P0, H, p_largest_cond_num, p_regularization_type=p_regularization_type, 
+                   compute_derivatives=True, dP_inf=dP_inft, dP0 = dP0t, dF=dFt, dQc=dQct)        
+        
+        (marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, \
+        mll_data_fit_deriv, mll_determ_deriv)  = btd_inference.marginal_ll(block_size, Y, Ki_diag, Ki_low_diag, Ki_logdet, H, noise_var, 
+                    compute_derivatives=True, d_Ki_diag=d_Ki_diag, d_Ki_low_diag=d_Ki_low_diag,
+                    d_Ki_logdet = d_Ki_logdet)
+                    
+        return marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, mll_data_fit_deriv, mll_determ_deriv       
+
+    @staticmethod
+    def mean_and_var(kernel, X_train, Y_train, var_or_likelihood, X_test=None, p_balance=False, p_largest_cond_num=1e+16,
+                     p_regularization_type=2, diff_x_crit=None):
+        """
+        Computes mean and variance of the posterior.
+        
+        Input:
+        ---------------
+        Same as for inference        
+        
+        X_train: array(N,1) 
+        
+        Y_train: array(N,1) 
+        
+        X_test: array(M,1) or None
+            Test data points.
+        
+        p_balance: bool
+            Balance general mode or not
+        
+        p_largest_cond_num: float
+            Largest condition number of the Qk matices. See function 
+            "sparse_inverse_cov".
+        
+        mll_call_tuple: tuple
+            This is tuple is obtained from the "sparse_inverse_cov" function,
+            and if X_test = None, then it can be reused here.
+        
+        mll_call_dict:
+            Dict obtained from "sparse_inverse_cov" function.
+        
+        diff_x_crit: float (not currently used)   
+            If new X_test points are added, this tells when to consider 
+            new points to be distinct. If it is None then the same variable
+            is taken from the class.
+            
+        p_regularization_type: 1 or 2
+        """        
+        
+        if isinstance(var_or_likelihood, likelihoods.Gaussian):
+            noise_var = var_or_likelihood.gaussian_variance()
+        elif isinstance(var_or_likelihood, float):
+            noise_var = var_or_likelihood
+        else:
+            raise ValueError("SparsePrecision1DInference.inference: var_or_likelihood has incorrect type.")
+        
+        if diff_x_crit is None:
+            diff_x_crit = SparsePrecision1DInference.diff_x_crit
+            
+        train_points_num = X_train.size
+        
+        import pdb; pdb.set_trace()  
+        (F,L,Qc,H,P_inf, P0, dFt,dQct,dP_inft, dP0t) = kernel.sde()
+        block_size = F.shape[1]    
+        
+        if p_balance:
+            (F,L,Qc,H,P_inf,P0, dF,dQct,dP_inft,dP0t) = ssm.balance_ss_model(F,L,Qc,H,P_inf,P0, dFt,dQct,dP_inft, dP0t)
+            print("SparsePrecision1DInference.mean_and_var: Balancing!")
+            
+        block_size = F.shape[1]   
+        
+        Ki_diag, Ki_low_diag, test_points_num, forward_index, inverse_index = \
+                btd_inference.mean_var_calc_prepare_matrices(block_size, X_train, X_test, 
+                                     Y_train, noise_var, F, L, Qc, P_inf, P0, H,
+                                       p_largest_cond_num, p_regularization_type, diff_x_crit=None)
+                                       
+        sp_mean, sp_var = btd_inference.mean_var_calc(block_size, Y_train, Ki_diag, 
+                                                      Ki_low_diag, H, noise_var, test_points_num, forward_index, inverse_index)
+        return sp_mean, sp_var
+        
+class SparsePrecision1DInferenceOld(LatentFunctionInference):
     """
     Sparce Precision 1D Inference
     """
@@ -1528,7 +1663,7 @@ class btd_inference(object):
                                         overwrite_a=False, check_finite=False)
                     self.Q_svd_dict[matrix_index] = (U,S,Vh)
                 
-                Q_inverse_r, new_S = btd_inference.psd_matrix_inverse(k, 0.5*(self.Qs[:,:, matrix_index] + self.Qs[:,:, matrix_index].T), U,S, p_largest_cond_num, p_regularization_type)
+                Q_inverse_r, new_S,_ = btd_inference.psd_matrix_inverse(k, 0.5*(self.Qs[:,:, matrix_index] + self.Qs[:,:, matrix_index].T), U,S, p_largest_cond_num, p_regularization_type)
                 self.Q_inverse_dict[matrix_index] = Q_inverse_r
 
             return Q_inverse_r, new_S
@@ -1581,48 +1716,45 @@ class btd_inference(object):
                 # the second computation of SVD is done to compute more precisely singular
                 # vectors of small singular values, since small singular values become large.
                 # It is not very clear how this step is useful but test is here.
-                (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
+                Q_r  = Q + regularizer*np.eye(Q.shape[0])
+                (U, S, Vh) = sp.linalg.svd( Q_r, 
                                             full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
                 
                 new_S = 1.0/S
                 Q_inverse_r = np.dot( U * new_S , U.T ) # Assume Q_inv is positive definite    
-                
                 # In this case, RBF kernel we get complx eigenvalues. Probably
                 # for small eigenvalue corresponding eigenvectors are not very orthogonal.
                 ##########Q_inverse = np.dot( Vh.T * ( 1.0/(S + regularizer)) , U.T )
             elif (regularization_type == 2):
-                # C = max( C_old/(2 * lamda) + lamda/C_old,  lamda/2 + 1/(2*lamda) ) # first terms are dominating in both parts of max                        
-                lamda_star = np.sqrt(current_conditional_number)
-                if 2*p_largest_cond_num >= lamda_star:
-                    lamda = current_conditional_number / 2 / p_largest_cond_num
+            
+                 new_border_value = np.sqrt(current_conditional_number)/2 
+                 if p_largest_cond_num >= new_border_value: # this type of regularization works
+                    regularizer = ( S[0] / p_largest_cond_num / 2.0 )**2
                     
-                    regularizer = (S[-1] * lamda)**2
+                    new_S = ( S/(S**2 + regularizer))
+                    Q_inverse_r = np.dot( U * new_S, U.T ) # Assume Q_inv is positive definite
+                    Q_r = np.dot( U * 1.0/new_S , U.T ) # Assume Q_inv is positive definite
+                 else:
                     
-                    new_S = S/(S**2 + regularizer)
-                    Q_inverse_r = np.dot( U * (new_S) , U.T ) # Assume Q_inv is positive definite
-                else:
-                    better_curr_cond_num = (2*p_largest_cond_num)**2 / 2 # division by 2 just in case here
+                    better_curr_cond_num = new_border_value 
                     warnings.warn("""state_space_main psd_matrix_inverse: reg_type = 2 can't be done completely.
                         Current conditionakl number {0:e} is reduced to {1:e} by reg_type = 1""".format(current_conditional_number, better_curr_cond_num))
                     
-                    regularizer = S[0] / better_curr_cond_num
+                    regularizer = S[0]/ (2* p_largest_cond_num)**2  - S[-1]
                     # the second computation of SVD is done to compute more precisely singular
                     # vectors of small singular values, since small singular values become large.
                     # It is not very clear how this step is useful but test is here.
                     (U, S, Vh) = sp.linalg.svd( Q + regularizer*np.eye(Q.shape[0]), 
                                                 full_matrices=False, compute_uv=True, overwrite_a=False, check_finite=False)
+                                                
+                    regularizer = ( S[0] / p_largest_cond_num / 2.0 )**2
                     
-                    lamda = better_curr_cond_num / 2 / p_largest_cond_num
+                    new_S = ( S/(S**2 + regularizer))
+                    Q_inverse_r = np.dot( U * new_S , U.T ) # Assume Q_inv is positive definite
+                    Q_r = np.dot( U * 1.0/new_S , U.T ) # Assume Q_inv is positive definite
                     
-                    regularizer = (S[-1] * lamda)**2
-                    
-                    new_S = S/(S**2 + regularizer)
-                    Q_inverse_r = np.dot( U * (new_S) , U.T ) # Assume Q_inv is positive definite
-                
-                assert lamda > 10, "Some assumptions are incorrect if this is not satisfied."
-                ######Q_inverse = np.dot( Vh.T * ( S/(S**2 + regularizer)) , U.T )
-                
             elif (regularization_type == 3): # NUllify the inverse of very small singular values
+                assert False, "Reg type 3 not supported!"
                 cutoff = S[0] / p_largest_cond_num                
                 
                 new_S = 1/S
@@ -1632,14 +1764,20 @@ class btd_inference(object):
                 
             else:
                 raise ValueError("AQcompute_batch_Python:Q_inverse: Invalid regularization type")
-        
+            
+            assert np.sqrt(regularizer)*100 < S[0], "regularizer is not << S[0]"
+         
+            #assert np.sqrt(regularizer) > 100*S[-1], "regularizer is not >> S[-1]"
+             
         else:
+            
             new_S = 1.0/S
             Q_inverse_r = np.dot( U * 1.0/S , U.T ) # Assume Q_inv is positive definite
+            Q_r = Q
         # When checking conditional number 2 times difference is ok.
         Q_inverse_r = 0.5*(Q_inverse_r + Q_inverse_r.T)
 
-        return Q_inverse_r, new_S
+        return Q_inverse_r, new_S, Q_r
     
     @staticmethod 
     def block_tridiag_solver(N,K, A_matr, C_matr, rhs_D_matr, rhs_diag=False, inversion_comp=None, rhs_C_matr=None,
@@ -2039,7 +2177,7 @@ class btd_inference(object):
         P_inf = 0.5*(P_inf + P_inf.T)
                 
         (U,S,Vh) = la.svd(P_inf, compute_uv=True,)
-        P_inf_inv, new_S = btd_inference.psd_matrix_inverse(0, P_inf, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
+        P_inf_inv, new_S,_ = btd_inference.psd_matrix_inverse(0, P_inf, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
         # Different inverse computation >-
         Ait[0:block_size,0:block_size] = b_ones
         Qi[0:block_size,0:block_size] = P_inf_inv
@@ -2118,8 +2256,8 @@ class btd_inference(object):
                 
     @staticmethod
     #@profile
-    def build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type=2, 
-                       compute_derivatives=False, dP_inf=None, dF=None, dQc=None):
+    def build_matrices(X, Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, p_regularization_type=2, 
+                       compute_derivatives=False, dP_inf=None, dP0 = None, dF=None, dQc=None):
         """
         TODO: introduce P0 for covariance and P_inf for noise calculation.
         K - block size
@@ -2171,14 +2309,20 @@ class btd_inference(object):
         if np.any(dt < 1e-3):
             raise ValueError("btd_inference.build_matrices: small dt explore!")
         
-        AQcomp = btd_inference.AQcompute_batch_Python(F,L,Qc,dt, compute_derivatives, grad_params_no, P_inf, dP_inf, dF, dQc)
+        #import pdb; pdb.set_trace()
+        P_inf = 0.5*(P_inf + P_inf.T)
+        _, _,P_inv_reg = btd_inference.psd_matrix_inverse(0, P_inf, U=None,S=None, p_largest_cond_num=p_largest_cond_num,  regularization_type =p_regularization_type) #=p_largest_cond_num, regularization_type=p_regularization_type)
+        
+        AQcomp = btd_inference.AQcompute_batch_Python(F,L,Qc,dt, compute_derivatives, grad_params_no, P_inv_reg, dP_inf, dF, dQc)
         # dt handling <-
         
+        #import pdb; pdb.set_trace()
         # First diagonal block computation ->
-        P_inf = 0.5*(P_inf + P_inf.T)
-        P_inf_inv, new_S = btd_inference.psd_matrix_inverse(0, P_inf, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
+        P0 = 0.5*(P0 + P0.T)
+        #P0_inv, new_S,_ = btd_inference.psd_matrix_inverse(0, P0, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type=p_regularization_type)
+        P0_inv, new_S,_ = btd_inference.psd_matrix_inverse(0, P0, U=None,S=None,p_largest_cond_num=p_largest_cond_num, regularization_type = p_regularization_type ) #=p_largest_cond_num, regularization_type=p_regularization_type)
         
-        Ki_diag[0:K,:] = P_inf_inv
+        Ki_diag[0:K,:] = P0_inv
         Ki_logdet[0] = np.sum( np.log( new_S[ new_S > 0.0] ) )
         
         #import pdb; pdb.set_trace()
@@ -2215,10 +2359,10 @@ class btd_inference(object):
             # Implement formula: d{Pi^{-1}}/dp = -Pi^{-1} d{Pi}/dp Pi^{-1}
             # 0-th diagonal block computation ->
             #tmp0 = -np.dot(P_inf_inv, np.rollaxis(dP_inf,1) ) # shapse is [K,K, grad_params_no]
-            tmp0 = -np.dot( np.rollaxis(dP_inf,2), P_inf_inv ) # shape is [grad_params_no,K,K]
+            tmp0 = -np.dot( np.rollaxis(dP0,2), P0_inv ) # shape is [grad_params_no,K,K]
             
             #tmp1 = np.dot(np.rollaxis(tmp0,2), P_inf_inv) # shapse is [grad_params_no,K,K]
-            tmp1 = np.dot( P_inf_inv, np.transpose(tmp0,(2,1,0)) ) # shape is [K,K, grad_params_no]
+            tmp1 = np.dot( P0_inv, np.transpose(tmp0,(2,1,0)) ) # shape is [K,K, grad_params_no]
             
             #d_Ki_diag[0:K,:] = np.rollaxis(tmp1,1).reshape(K,K*grad_params_no)
             d_Ki_diag[0:K,:] = tmp1.transpose((0,2,1)).reshape(K,K*grad_params_no)
@@ -2233,8 +2377,8 @@ class btd_inference(object):
             Qk = AQcomp.Qk(k)
             Qk = 0.5*(Qk + Qk.T) # symmetrize because if Qk is not full rank it becomes not symmetric due to numerical problems
             #import pdb; pdb.set_trace()
+            #Qk_inv, new_S = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type) # in AQcomp numbering starts from 0, consequence of Python indexing.
             Qk_inv, new_S = AQcomp.Q_inverse(k, p_largest_cond_num, p_regularization_type) # in AQcomp numbering starts from 0, consequence of Python indexing.
-            
             
             Ki_low_diag[(k)*K:(k+1)*K, :] = - np.dot( Qk_inv, Ak )
             
@@ -2416,13 +2560,15 @@ class btd_inference(object):
             mll_determ_deriv[-1,0] += N/g_noise_var 
             
             d_marginal_ll = -0.5*( mll_determ_deriv + mll_data_fit_deriv)
-            
+        else:
+            mll_data_fit_deriv = None
+            mll_determ_deriv = None
             
         return marginal_ll, d_marginal_ll, mll_data_fit_term, mll_log_det, mll_data_fit_deriv, mll_determ_deriv
     
     
     @staticmethod
-    def mean_var_calc_prepare_matrices(K, X_train, X_test, Y_train, var_or_likelihood, F, L, Qc, P_inf, H,
+    def mean_var_calc_prepare_matrices(K, X_train, X_test, Y_train, var_or_likelihood, F, L, Qc, P_inf, P0, H,
                                        p_largest_cond_num=1e+13, p_regularization_type=2, diff_x_crit=None):
         
         """
@@ -2476,9 +2622,9 @@ class btd_inference(object):
         
             inverse_index = None
             return_index = None
-            
-        Ki_diag, Ki_low_diag,_ ,_ ,_ ,_ = btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, H, p_largest_cond_num, p_regularization_type=2, 
-                       compute_derivatives=False, dP_inf=None, dF=None, dQc=None)
+                       
+        Ki_diag, Ki_low_diag,_ ,_ ,_ ,_ = btd_inference.build_matrices(X, Y, F, L, Qc, P_inf, P0, H, p_largest_cond_num, p_regularization_type=2, 
+                       compute_derivatives=False, dP_inf=None, dP0= None, dF=None, dQc=None)
         
         return Ki_diag, Ki_low_diag, test_points_num, return_index, inverse_index
         
@@ -2510,6 +2656,7 @@ class btd_inference(object):
         g_noise_var:
     
         """
+        # !!! TODO: P0 and P_inf handle
         if forward_index is not None:
             which_train = np.vstack( ( np.ones(Y.shape), np.zeros( (test_points_num,1) )) )
             which_train = which_train[forward_index]

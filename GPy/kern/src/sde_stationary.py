@@ -50,7 +50,7 @@ class sde_RBF(RBF):
             self.approx_order = kwargs.get('approx_order')
             del kwargs['approx_order']
         else:
-            self.approx_order = 10
+            self.approx_order = 6
         
         
         
@@ -68,6 +68,15 @@ class sde_RBF(RBF):
     def sde(self):
         """
         Return the state space representation of the covariance.
+        
+        Note! For Sparse GP inference too small or two high values of lengthscale
+        leand to instabilities. This is because Qc are too high or too low
+        and P_inf are not full rank. This effect depends on approximatio order.
+        For N = 10. lengthscale must be in (0.8,8). For other N tests must be conducted.
+        N=6: (0.06,31)
+        Variance should be within reasonable bounds as well, but its dependence is linear.
+        
+        The above facts do not take into accout regularization.
         """
         if self.approx_order is not None:
             N = self.approx_order
