@@ -22,9 +22,9 @@ import GPy.models.ss_sparse_model as ss_sparse_model
 
 from nose import SkipTest
 
-from GPy.inference.latent_function_inference.ss_sparse_inference import sparse_inference
+#from GPy.inference.latent_function_inference.ss_sparse_inference import sparse_inference
 from GPy.inference.latent_function_inference.ss_sparse_inference import btd_inference
-from GPy.inference.latent_function_inference.ss_sparse_inference import SparsePrecision1DInference
+#from GPy.inference.latent_function_inference.ss_sparse_inference import SparsePrecision1DInference
 
 def generate_data(n_points,x_lower_value=0.0, x_upper_value=200.0):
     """
@@ -1424,8 +1424,11 @@ class SparsePrecitionTests(np.testing.TestCase):
                                   mean_compare_decimal, var_compare_decimal)
                                   
 if __name__ == "__main__":
-#    print("Running sparse precision inference tests...")
-#    unittest.main()
+    print("Running sparse precision inference tests...")
+    unittest.main()
+    
+    
+    
     
 #    tt = ComputationalRoutinesTests('test_btd_system_solution1')
 #    tt.test_btd_system_solution1()
@@ -1447,13 +1450,13 @@ if __name__ == "__main__":
 #
 #    tt = SparsePrecitionMLLTests('test_test_Complex_kernel')
 #    tt.test_test_Complex_kernel()
-
+#
 #    tt = SparsePrecitionMLLTests('test_build_matrix_Matern52')
 #    tt.test_build_matrix_Matern52()
 # 
 #    tt = SparsePrecitionMLLTests('test_build_matrix_RBF')
 #    tt.test_build_matrix_RBF()
-    
+#    
 #    tt = SparsePrecitionMLLTests('test_Matern52_kernel')
 #    tt.test_Matern52_kernel()
 # 
@@ -1462,15 +1465,18 @@ if __name__ == "__main__":
 #     
 #    tt = SparsePrecitionTests('test_mean_var_prepare_matrices1')
 #    tt.test_mean_var_prepare_matrices1()
-    
+#    
 #    tt = SparsePrecitionTests('test_mean_var_prepare_matrices2')
 #    tt.test_mean_var_prepare_matrices2()
 #    
 #    tt = SparsePrecitionTests('test_mean_var_prepare_matrices3')
 #    tt.test_mean_var_prepare_matrices3()
 #    
-    tt = SparsePrecitionTests('test_mean_var_calc')
-    tt.test_mean_var_calc()
+#    tt = SparsePrecitionTests('test_mean_var_calc')
+#    tt.test_mean_var_calc()
+    
+    
+    
     
     
     #tt = SparsePrecitionTests('test_sde_sparse_1')

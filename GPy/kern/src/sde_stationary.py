@@ -11,6 +11,7 @@ from .stationary import RatQuad
 
 import numpy as np
 import scipy as sp
+import warnings
 
 class sde_RBF(RBF):
     """
@@ -70,7 +71,7 @@ class sde_RBF(RBF):
         Return the state space representation of the covariance.
         
         Note! For Sparse GP inference too small or two high values of lengthscale
-        leand to instabilities. This is because Qc are too high or too low
+        lead to instabilities. This is because Qc are too high or too low
         and P_inf are not full rank. This effect depends on approximatio order.
         For N = 10. lengthscale must be in (0.8,8). For other N tests must be conducted.
         N=6: (0.06,31)
@@ -78,6 +79,7 @@ class sde_RBF(RBF):
         
         The above facts do not take into accout regularization.
         """
+        #import pdb; pdb.set_trace()
         if self.approx_order is not None:
             N = self.approx_order
         else:
@@ -92,6 +94,10 @@ class sde_RBF(RBF):
         kappa = 1.0/2.0/p_lengthscale**2
 
         Qc = np.array( ((p_variance*np.sqrt(np.pi/kappa)*fn*(4*kappa)**N,),) )
+        
+        if (float(Qc) > 1e8) or (float(Qc) < 1e-8):
+            warnings.warn("""sde_RBF kernel: the noise variance Qc is either very large or very small. 
+                                It influece conditioning of P_inf: {0:e}""".format(float(Qc)) )
 
         pp1 = np.zeros((2*N+1,)) # array of polynomial coefficients from higher power to lower
 

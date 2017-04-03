@@ -104,11 +104,11 @@ class sde_StdPeriodic(StdPeriodic):
         
         dq2l = 2*dq2l  # This is because the lengthscale if multiplied by 2.
         
-        if np.any( np.isfinite(q2) == False):
-            raise ValueError("SDE periodic covariance error 1")
+        if np.any( np.isfinite(q2) == False) or np.any( np.abs(q2) > 1e8) or np.any( np.abs(q2) < 1e-8):
+            raise ValueError("sde_Periodic:  Infinite, too small, or too large values in q2:" + q2.__format__("") )
         
-        if np.any( np.isfinite(dq2l) == False):
-            raise ValueError("SDE periodic covariance error 2")
+        if np.any( np.isfinite(dq2l) == False) or np.any( np.abs(dq2l) > 1e8) or np.any( np.abs(dq2l) < 1e-8):
+            raise ValueError("sde_Periodic:  Infinite, too small, or too large values in dq2l:" + dq2l.__format__("") )
         
         F    = np.kron(np.diag(range(0,N+1)),np.array( ((0, -w0), (w0, 0)) ) )
         L    = np.eye(2*(N+1))
