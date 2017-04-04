@@ -95,7 +95,8 @@ class sde_RBF(RBF):
 
         Qc = np.array( ((p_variance*np.sqrt(np.pi/kappa)*fn*(4*kappa)**N,),) )
         
-        if (float(Qc) > 1e8) or (float(Qc) < 1e-8):
+        eps = 1e-12
+        if (float(Qc) > 1.0/eps) or (float(Qc) < eps):
             warnings.warn("""sde_RBF kernel: the noise variance Qc is either very large or very small. 
                                 It influece conditioning of P_inf: {0:e}""".format(float(Qc)) )
 

@@ -98,7 +98,7 @@ class StateSpaceKernelsTests(np.testing.TestCase):
                         plot = False, points_num=50, x_interval = (0, 20), random=True)
         X.shape = (X.shape[0],1); Y.shape = (Y.shape[0],1)
 
-        ss_kernel = GPy.kern.sde_RBF(1, 110., 1.5, active_dims=[0,])
+        ss_kernel = GPy.kern.sde_RBF(1, 110., 1.5, active_dims=[0,], balance=True, approx_order=10)
         gp_kernel = GPy.kern.RBF(1, 110., 1.5, active_dims=[0,])
 
         self.run_for_model(X, Y, ss_kernel, check_gradients=True,
