@@ -1682,7 +1682,7 @@ class btd_inference(object):
         Inputs:
         ------------------------------
         k: int
-        Iteration umber. Used for information only. Value -1 corresponds to P_inf_inv.
+        Iteration number. Used for information only. Value -1 corresponds to P_inf_inv.
         
         Q: matrix
         To be inverted
@@ -2271,7 +2271,6 @@ class btd_inference(object):
                        compute_derivatives=False, dP_inf=None, dP0 = None, dF=None, dQc=None,
                        also_sparse=False):
         """
-        TODO: introduce P0 for covariance and P_inf for noise calculation.
         K - block size
         
         Input:
@@ -2290,14 +2289,15 @@ class btd_inference(object):
             Ki_D: matrix(N*K, K)
                 Diagonal of the Ki matrix, diagonal blocks are in block-column
             Ki_C: matrix((N-1)*K, K)
-                Subdiagonal of he Ki matrix, subdiagonal blocks are in block-column
+                Subdiagonal of the Ki matrix, subdiagonal blocks are in block-column
             Ki_DN: matrix(N*K, K)
                 The same as Ki_D plus HtH to each block
             d_Ki_D: matrix(N*K, K*deriv_num)
                 Derivatives of the matrix Ki_D, derivatives are row-wise
             d_Ki_C: matrix((N-1)*K, K*deriv_num)
                 Derivatives of the matrix Ki_C, derivatives are row-wise
-            
+            Ki_sparse: sparse matrix 
+                Sparse form of Ki if also_sparse==True.
         """
         #import pdb; pdb.set_trace()
         K = F.shape[0] # block_size
@@ -2413,7 +2413,7 @@ class btd_inference(object):
                 Ki_sparse[ (k+1)*K:(k+2)*K, (k)*K:(k+1)*K ] = Ki_low_diag[(k)*K:(k+1)*K, :] # Ki_low_diag
                 Ki_sparse[ (k)*K:(k+1)*K, (k+1)*K:(k+2)*K ] = Ki_low_diag[(k)*K:(k+1)*K, :].T # Ki_high_diag 
                 
-                Ki_sparse[(k)*K:(k+1)*K,(k)*K:(k+1)*K] += Ki_low_diag[(k)*K:(k+1)*K, :] # this diag
+                Ki_sparse[(k)*K:(k+1)*K,(k)*K:(k+1)*K] = Ki_diag[(k)*K:(k+1)*K, :] # this diag
                 Ki_sparse[(k+1)*K:(k+2)*K,(k+1)*K:(k+2)*K] = Ki_diag[ (k+1)*K:(k+2)*K, :]
             # Filling sparse matrix <-
             
@@ -2468,8 +2468,11 @@ class btd_inference(object):
             return Ki_diag, Ki_low_diag, Ki_logdet.sum(), d_Ki_diag if d_Ki_diag is not None else None, \
                 d_Ki_low_diag, d_Ki_logdet.sum(axis=0) if d_Ki_logdet is not None else None
         else:
-            return Ki_diag, Ki_low_diag, Ki_logdet.sum(), d_Ki_diag if d_Ki_diag is not None else None, \
-                d_Ki_low_diag, d_Ki_logdet.sum(axis=0) if d_Ki_logdet is not None else None, Ki_sparse
+            return Ki_diag, Ki_low_diag, Ki_logdet.sum(),\
+                    d_Ki_diag if d_Ki_diag is not None else None,\
+                    d_Ki_low_diag if d_Ki_low_diag is not None else None,\
+                    d_Ki_logdet.sum(axis=0) if d_Ki_logdet is not None else None,\
+                    Ki_sparse
         
     def test_marginal_ll(Y, Ki, Ki_logdet, H, g_noise_var, 
                     compute_derivatives=False, d_Ki=None, d_Ki_logdet = None):
